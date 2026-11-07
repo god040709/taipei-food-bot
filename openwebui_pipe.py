@@ -97,6 +97,7 @@ JSON 格式：
 REASON_PROMPT = """你是台北餐廳推薦助理。根據使用者的需求和每家餐廳的資料，為每一家寫推薦理由。
 規則：
 - 每家寫 1~2 句，說明這家店的特色，以及為什麼適合這位使用者（人數、預算、想吃的類型）。
+- min_price ~ max_price 是「多數人用餐的每人花費區間」，不是最低消費或最高消費，提到價格時請這樣理解。
 - 只能根據資料裡的內容：名稱、類別、價格、facts（客觀事實）、summary（店家簡介）、
   highlights（服務特色）、reviews（顧客評論摘錄）。資料沒有的菜色、裝潢、營業時間不可以編造。
 - reviews 裡顧客常提到的招牌菜、湯頭、服務、氣氛，可以用「評論常提到…」的方式引用。
@@ -459,12 +460,11 @@ class Pipe:
 
     @staticmethod
     def price_text(r: dict) -> str:
+        # 價格區間是「多數人用餐的花費」，不是最低／最高消費
         low, high = int(r["min_price"]), int(r["max_price"])
-        text = f"${high} 以下 / 人" if low <= 1 else f"${low} - ${high} / 人"
+        text = f"多數人花費 ${high} 以下 / 人" if low <= 1 else f"多數人花費 ${low} - ${high} / 人"
         if r.get("budget_fit") == "partial":
-            text += "（⚠️ 部分餐點可能超出預算）"
-        elif r.get("budget_fit") == "over" and r.get("over_by") is not None:
-            text += f"（⚠️ 超出預算約 {int(r['over_by'])} 元）"
+            text += "（⚠️ 可能超出預算）"
         return text
 
     def format_card(self, i: int, r: dict, reason: str) -> str:
@@ -536,13 +536,14 @@ class Pipe:
                                 f"以下把預算稍微放寬到每人約 {relaxed} 元來找。")
             else:
                 sections.append(f"⚠️ 符合每人 {budget} 元預算的店只有 {matched} 家，"
-                                f"後面補上預算稍微超過（每人約 {relaxed} 元內）的選擇。")
+                                f"後面補上比預算稍微高一點（放寬到每人約 {relaxed} 元）的選擇。")
         if intro:
             sections.append(f"💬 {intro}")
         blocks = []
         for i, (r, reason) in enumerate(zip(restaurants, reasons), 1):
-            if r.get("budget_fit") == "over" and (i == 1 or restaurants[i - 2].get("budget_fit") != "over"):
-                blocks.append(f"💸 **以下是預算稍微超過的選擇（每人約 {relaxed or '更高'} 元內）**")
+            # 前面有符合預算的店時，才需要分隔標題（第一家就超過預算時，開頭的 ⚠️ 已經說明）
+            if r.get("budget_fit") == "over" and i > 1 and restaurants[i - 2].get("budget_fit") != "over":
+                blocks.append(f"💸 **以下是比預算稍微高一點的選擇（放寬到每人約 {relaxed or '更高'} 元）**")
             blocks.append(self.format_card(i, r, reason))
         sections.append("\n\n---\n\n".join(blocks))
         if tips:

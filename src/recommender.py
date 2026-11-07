@@ -157,9 +157,11 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
 
 def apply_filters(df, district=None, category=None, party_size=None, budget=None):
     """依條件篩選。預算是「每人上限」：
-    - within  = 整個價格區間都在預算內（最高價 ≤ 預算）→ 優先推薦
-    - partial = 最低價低於預算、最高價超過預算 → 排在後面，並標示
-    - 最低價 ≥ 預算的店（例如預算 800、店家 800~1000）不推薦"""
+    價格區間（min_price ~ max_price）是 Google 的「多數人用餐花費」區間，不是最低／最高消費。
+    - within  = 多數人的花費都在預算內（區間上限 ≤ 預算）→ 優先推薦
+    - partial = 預算落在花費區間中間（區間下限 < 預算 < 上限）→ 排在後面，並標示
+    - 區間下限 ≥ 預算的店（例如預算 800、多數人花 800~1000）不算符合預算，
+      只在符合的店不夠時，當作「比預算稍微高一點」的選擇補在最後"""
     if district and district != "全區":
         df = df[df['district'].str.contains(district, regex=False, na=False)]
     if category and category != "不限":
@@ -230,7 +232,7 @@ def describe_facts(row, budget=None, has_within=True):
         facts.append("屬於同區同類型中較高價位的選擇")
 
     if budget and row["budget_fit"] == "within":
-        facts.append(f"價格完全在每人 {budget} 元預算內")
+        facts.append(f"多數人的花費都在每人 {budget} 元預算內")
     return facts
 
 
@@ -238,21 +240,25 @@ def rank_note(row, budget=None, has_within=True):
     """排在比較後面的原因（沒有就回傳空字串）。"""
     if not budget:
         return ""
-    if row["budget_fit"] == "over":
-        return (f"最低消費 ${int(row['min_price'])} 起，比每人 {budget} 元的預算多約 "
-                f"{int(row['over_by'])} 元，所以排在符合預算的店後面")
+    # 「比預算稍微高一點」的店已經有分隔標題說明，不用每家再寫
     if row["budget_fit"] == "partial" and has_within:
         # 前面沒有完全符合預算的店時，它本來就排在最前面，不用寫「排在後面」
-        return f"最低消費在預算內，但部分餐點超過每人 {budget} 元，所以排在完全符合預算的店後面"
+        return (f"多數人花費 {price_range(row)}，每人 {budget} 元可能不太夠，"
+                "所以排在花費都在預算內的店後面")
     return ""
 
 
-def price_text(row):
+def price_range(row):
     """Google 的「$1-200」代表 200 元以下，顯示成比較自然的文字。"""
     low, high = int(row["min_price"]), int(row["max_price"])
     if low <= 1:
-        return f"${high} 以下 / 人"
-    return f"${low} - ${high} / 人"
+        return f"${high} 以下"
+    return f"${low} - ${high}"
+
+
+def price_text(row):
+    """多數人用餐的花費區間（不是最低／最高消費）。"""
+    return f"多數人花費 {price_range(row)} / 人"
 
 
 def fallback_reason(facts):
@@ -264,9 +270,7 @@ def format_card(i, row, reason=""):
     """一家餐廳的顯示文字。row 可以是 dict 或 pandas Series。"""
     price = price_text(row)
     if row.get("budget_fit") == "partial":
-        price += "（⚠️ 部分餐點可能超出預算）"
-    elif row.get("budget_fit") == "over":
-        price += f"（⚠️ 超出預算約 {int(row['over_by'])} 元）"
+        price += "（⚠️ 可能超出預算）"
     lines = [
         f"**{i}. {row['name']}**",
         f"📍 {row['district']}・{row['category']}｜⭐ {row['rating']}"
