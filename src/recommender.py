@@ -150,8 +150,8 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     results.attrs["matched_within"] = int((df["budget_fit"] == "within").sum()) if budget else matched
     results.attrs["relaxed_budget"] = relaxed_budget if (results["budget_fit"] == "over").any() else None
     # 補完還是不到 top_n 家：算出放寬哪個條件可以多找到幾家
-    results.attrs["alternatives"] = suggest_relaxations(all_df, district, category, party_size, budget) \
-        if len(results) < top_n else []
+    results.attrs["alternatives"] = suggest_relaxations(all_df, district, category, party_size, budget,
+                                                         shown=len(results)) if len(results) < top_n else []
     return results, None
 
 
@@ -181,9 +181,10 @@ def relaxations_for(district=None, category=None, party_size=None, budget=None):
         return []
 
 
-def suggest_relaxations(df, district, category, party_size, budget):
-    """結果太少時，建議放寬的方式，例如「不限地區 → 64 家」「預算 500 → 5 家」。"""
-    current = len(apply_filters(df, district, category, party_size, budget))
+def suggest_relaxations(df, district, category, party_size, budget, shown=0):
+    """結果太少時，建議放寬的方式，例如「不限地區 → 64 家」「預算 500 → 5 家」。
+    shown：目前已經顯示幾家；建議要能找到比這更多的店才列出來。"""
+    current = max(len(apply_filters(df, district, category, party_size, budget)), shown)
     options = []
     if district:
         n = len(apply_filters(df, None, category, party_size, budget))
