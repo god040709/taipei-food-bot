@@ -73,7 +73,8 @@ PARSE_PROMPT = f"""你是台北餐廳推薦系統的「搜尋條件抽取器」�
 請根據對話，找出使用者「目前」想要的搜尋條件，只輸出一個 JSON 物件，不要任何其他文字。
 
 JSON 格式：
-{{"district": 字串或 null, "category": 字串或 null, "party_size": 整數或 null, "budget": 整數或 null}}
+{{"intent": "search" 或 "more" 或 "reject" 或 "chat", "district": 字串或 null, "category": 字串或 null,
+  "party_size": 整數或 null, "budget": 整數或 null, "reject": [店名, ...]}}
 
 規則：
 1. district 只能是以下其中之一，或 null：{"、".join(DISTRICTS)}
@@ -93,6 +94,13 @@ JSON 格式：
    - 「不限地區」「哪裡都可以」：district 設為 null。
 6. 如果助理上一則是在反問（以 🤔 開頭），使用者這次的回覆就是在回答那些問題，
    要和更早的需求合併。例如助理問「每人預算大概多少？」，使用者回「800」→ budget=800。
+7. intent 是使用者這句話的意圖，只能是以下其中之一：
+   - "search"：提出或修改搜尋條件、回答助理的反問。
+   - "more"：要求換一批、推薦別的、還有其他的。
+   - "reject"：表示不喜歡、吃過、去過、不想去「推薦過的某幾間店」。
+     reject 要填那些店的完整名稱，只能從「最近推薦過的店」清單裡選；「第2間」就是清單第 2 家。
+   - "chat"：道謝、閒聊、或詢問已經推薦的店的細節，不是要新的推薦。
+   不管 intent 是什麼，district / category / party_size / budget 都要填目前沿用的條件。
 """
 
 REASON_PROMPT = """你是台北餐廳推薦助理。根據使用者的需求和每家餐廳的資料，為每一家寫推薦理由。
@@ -104,13 +112,29 @@ REASON_PROMPT = """你是台北餐廳推薦助理。根據使用者的需求和�
 - reviews 裡顧客常提到的招牌菜、湯頭、服務、氣氛，可以用「評論常提到…」的方式引用。
 - 不要寫推薦指數、分數或計算方式。不要每家都用一樣的句型開頭。
 - 預算超出的部分（budget_fit 是 "partial" 或 "over"）系統會另外顯示原因，推薦理由裡不用再提。
+- intro 是一兩句自然的開場，要回應使用者最新的那句話（例如「了解，幫你避開吃過的那家」）；
+  如果有「系統說明」（排除了店家、預算放寬、找不到某種子類型），用自然的口吻帶到。
 - 只輸出 JSON，不要其他文字，格式：
-  {"intro": "一句話的開場，例如這批推薦的整體方向", "reasons": ["第 1 家的理由", "第 2 家的理由", ...]}
+  {"intro": "開場", "reasons": ["第 1 家的理由", "第 2 家的理由", ...]}
   reasons 的數量和順序要和餐廳資料完全一樣。
+"""
+
+CHAT_PROMPT = """你是「台北美食推薦機器人」的對話助理，用繁體中文、自然友善地回覆。
+- 使用者這句話不是要新的推薦（例如道謝、閒聊、問推薦過的店的細節）。
+- 關於餐廳的問題，只能根據下面「最近的推薦內容」回答；資料沒有的（營業時間、菜單、停車、訂位方式…）
+  就說資料裡沒有，建議點 Google Maps 連結查看。不要編造餐廳或資料。
+- 回覆 1~3 句。最後可以自然地提一下能做的事：換一批、改條件、說出想吃的類型。
 """
 
 # 反問訊息的開頭符號（用來判斷上一則是不是反問）
 ASK_MARK = "🤔 "
+# 閒聊回覆的開頭符號（不影響條件的沿用）
+CHAT_MARK = "💬 "
+# 「不喜歡／吃過」：強烈的說法單獨出現就算；「不要」這類要搭配指定的店（第幾間、店名）才算
+REJECT_STRONG = ["不喜歡", "吃過", "去過", "踩雷", "難吃", "沒興趣", "不想去", "不想吃", "不考慮", "排除"]
+REJECT_SOFT = ["不要", "換掉", "跳過", "pass"]
+REJECTED_MARK = "🚫 不再推薦："
+CN_INDEX = {"一": 1, "二": 2, "兩": 2, "三": 3, "四": 4, "五": 5}
 # 使用者表示「全部都不在意」的說法 → 不再反問，直接推薦
 SKIP_WORDS = ["都可以", "隨便", "都行", "沒差", "無所謂", "皆可", "直接推薦", "不用問"]
 # 針對單一條件表示「不限」的說法（先比對這些，再比對上面的 SKIP_WORDS）
@@ -329,6 +353,11 @@ class Pipe:
 
     def parse_with_llm(self, messages: list):
         """用 LLM 解析整段對話，回傳 (district, category, party_size, budget)。"""
+        d = self.parse_with_llm_full(messages, self.last_recommended(messages))
+        return d["district"], d["category"], d["party_size"], d["budget"]
+
+    def parse_with_llm_full(self, messages: list, recent_names: list) -> dict:
+        """用 LLM 解析條件、意圖（search/more/reject/chat）與不喜歡的店。"""
         history = []
         for m in messages[-12:]:
             content = m.get("content", "")
@@ -336,7 +365,10 @@ class Pipe:
                 # 助理的長篇回答只保留開頭（含先前解析的條件），節省 token
                 history.append({"role": m["role"], "content": content[:300]})
 
-        raw = self._chat([{"role": "system", "content": PARSE_PROMPT}] + history, max_tokens=200)
+        system = PARSE_PROMPT
+        if recent_names:
+            system += "\n最近推薦過的店：\n" + "\n".join(f"{i}. {n}" for i, n in enumerate(recent_names, 1))
+        raw = self._chat([{"role": "system", "content": system}] + history, max_tokens=300)
         match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
         if not match:
             raise ValueError(f"LLM 沒有回傳 JSON：{raw[:100]}")
@@ -354,7 +386,11 @@ class Pipe:
             except (TypeError, ValueError):
                 return None
 
-        return district, category, to_int(data.get("party_size")), to_int(data.get("budget"))
+        intent = data.get("intent") if data.get("intent") in ("search", "more", "reject", "chat") else "search"
+        reject = [n for n in (data.get("reject") or []) if n in recent_names]
+        return {"district": district, "category": category,
+                "party_size": to_int(data.get("party_size")), "budget": to_int(data.get("budget")),
+                "intent": intent, "reject": reject}
 
     @staticmethod
     def current_round(messages: list):
@@ -368,6 +404,8 @@ class Pipe:
             if m.get("role") == "user":
                 texts.append(content)
             elif m.get("role") == "assistant":
+                if content.startswith(CHAT_MARK):
+                    continue  # 閒聊回覆：跳過
                 if not content.startswith(ASK_MARK):
                     break
                 asks += 1
@@ -382,7 +420,7 @@ class Pipe:
             content = m.get("content", "")
             if m.get("role") != "assistant" or not isinstance(content, str):
                 continue
-            if content.startswith(ASK_MARK):
+            if content.startswith((ASK_MARK, CHAT_MARK)):
                 continue
             match = re.search(r"🔎 搜尋條件：(.+?)（", content)
             if not match:
@@ -418,7 +456,8 @@ class Pipe:
         """上一次推薦的子類型（「🔎 搜尋條件：…｜火鍋・壽喜燒｜…」），沒有就回傳 None。"""
         for m in reversed(messages[:-1]):
             content = m.get("content", "")
-            if m.get("role") != "assistant" or not isinstance(content, str) or content.startswith(ASK_MARK):
+            if m.get("role") != "assistant" or not isinstance(content, str) \
+                    or content.startswith((ASK_MARK, CHAT_MARK)):
                 continue
             match = re.search(r"🔎 搜尋條件：[^（]*?・([^｜（]+)", content)
             return match.group(1) if match and match.group(1) in SUBTYPES else None
@@ -445,13 +484,25 @@ class Pipe:
         return None
 
     def get_conditions(self, messages: list):
-        """回傳 (條件 tuple, 解析方式, 總預算, 子類型)。總預算會除以人數，換算成每人預算。"""
+        """回傳 (條件 tuple, 解析方式, info)。
+        info：total（總預算）、subtype（子類型）、intent / reject（LLM 判斷的意圖與不喜歡的店）、
+              llm_note（LLM 沒用上的原因，顯示在條件行，方便除錯）。
+        總預算會除以人數，換算成每人預算。"""
         conditions, source = None, "規則"
-        if self.valves.USE_LLM_PARSER and self._llm_enabled():
+        info = {"intent": None, "reject": [], "llm_note": ""}
+        if self.valves.USE_LLM_PARSER and not self._llm_enabled():
+            info["llm_note"] = "未設定 LLM 金鑰"
+        elif self.valves.USE_LLM_PARSER:
             try:
-                conditions, source = self.parse_with_llm(messages), "LLM"
+                d = self.parse_with_llm_full(messages, self.last_recommended(messages))
+                conditions, source = (d["district"], d["category"], d["party_size"], d["budget"]), "LLM"
+                info.update(intent=d["intent"], reject=d["reject"])
+            except requests.exceptions.HTTPError as e:
+                info["llm_note"] = f"LLM 回應錯誤 HTTP {e.response.status_code}"
+            except requests.exceptions.RequestException:
+                info["llm_note"] = "連不到 LLM 服務"
             except Exception:
-                pass  # LLM 失敗時退回規則解析
+                info["llm_note"] = "LLM 回傳格式不對"
         if conditions is None:
             conditions = self.parse_rounds(messages)
         # 使用者說「不限地區」「預算不限」→ 那一項清空
@@ -486,7 +537,8 @@ class Pipe:
             else:
                 category = parent
         conditions = (district, category, party_size, budget)
-        return conditions, source, total, subtype
+        info.update(total=total, subtype=subtype)
+        return conditions, source, info
 
     # ------------------------------------------------------------------
     # 資訊不足時持續反問
@@ -615,9 +667,88 @@ class Pipe:
         return names
 
     # ------------------------------------------------------------------
+    # 「我不喜歡第 2 間」「輕鬆煮吃過了」→ 之後都不再推薦
+    # ------------------------------------------------------------------
+    @staticmethod
+    def last_recommended(messages: list) -> list:
+        """最近一次推薦的店名（依顯示順序）。"""
+        for m in reversed(messages[:-1]):
+            content = m.get("content", "")
+            if m.get("role") != "assistant" or not isinstance(content, str) \
+                    or content.startswith((ASK_MARK, CHAT_MARK)):
+                continue
+            return re.findall(r"^\*\*\d+\. (.+?)\*\*$", content, flags=re.MULTILINE)
+        return []
+
+    @staticmethod
+    def rejected_history(messages: list) -> list:
+        """這段對話裡使用者說過不喜歡／吃過的店（從「🚫 不再推薦：「A」「B」」讀回來）。"""
+        names = []
+        for m in messages[:-1]:
+            content = m.get("content", "")
+            if m.get("role") != "assistant" or not isinstance(content, str):
+                continue
+            for line in content.splitlines():
+                if line.startswith(REJECTED_MARK):
+                    names += re.findall(r"「(.+?)」", line)
+        return names
+
+    @staticmethod
+    def find_rejects(text: str, names: list, force: bool = False):
+        """回傳 (使用者指定不要的店名, 是否在表達「不喜歡／吃過」)。
+        force=True：剛問過「是哪一間呢？」，這次的回覆就算沒說「吃過」也是在指定店家。"""
+        strong = any(w in text for w in REJECT_STRONG) or force
+        soft = any(w in text.lower() for w in REJECT_SOFT)
+        if not (strong or soft) or not names:
+            return [], strong
+        picked = []
+        for m in re.finditer(r"第\s*([一二兩三四五1-9])\s*(?:間|家|個|名)?", text):
+            picked.append(CN_INDEX.get(m.group(1)) or int(m.group(1)))
+        for m in re.finditer(r"(?<!\d)([1-9])\s*號", text):
+            picked.append(int(m.group(1)))
+        m = re.search(r"前\s*([兩二三四2-4])\s*(?:間|家|個|名)", text)
+        if m:
+            picked += list(range(1, (CN_INDEX.get(m.group(1)) or int(m.group(1))) + 1))
+        result = [names[i - 1] for i in picked if 1 <= i <= len(names)]
+        for name in names:  # 直接說店名，或店名的開頭（例如「肉老大頂級肉品…」說成「肉老大」）
+            key = re.split(r"[\s｜|（(\-—－/／:：,，。]", name)[0]
+            if name in text or (len(key) >= 2 and key in text):
+                result.append(name)
+                continue
+            # 店名開頭至少 3 個字出現在句子裡（太短的像「燒肉」容易誤判，不算）
+            if any(key[:k] in text for k in range(len(key), 2, -1)):
+                result.append(name)
+        if not result and strong and re.search(r"都|全部|這些|這幾|以上", text):
+            result = list(names)
+        result = list(dict.fromkeys(result))  # 去重、保留順序
+        return result, (strong or bool(result))
+
+    def ask_which(self, names: list) -> str:
+        lines = [f"{ASK_MARK}是哪一間呢？可以直接說「第 2 間」或店名，我就不會再推薦它："]
+        lines += [f"{i}. {n}" for i, n in enumerate(names, 1)]
+        return "\n".join(lines)
+
+    def chat_reply(self, messages: list) -> Optional[str]:
+        """不是要新推薦的訊息（道謝、閒聊、問細節）→ 用 LLM 自然回覆。"""
+        recent = ""
+        for m in reversed(messages[:-1]):
+            content = m.get("content", "")
+            if m.get("role") == "assistant" and isinstance(content, str) \
+                    and not content.startswith((ASK_MARK, CHAT_MARK)):
+                recent = content[:2500]
+                break
+        history = [{"role": m["role"], "content": str(m.get("content", ""))[:500]}
+                   for m in messages[-6:] if m.get("role") in ("user", "assistant")]
+        try:
+            return self._chat([{"role": "system", "content": CHAT_PROMPT + "\n最近的推薦內容：\n" + recent}]
+                              + history, max_tokens=300)
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
     # 推薦理由（每家一段，寫餐廳特色）
     # ------------------------------------------------------------------
-    def write_reasons(self, texts: list, conditions, restaurants: list, subtype=None):
+    def write_reasons(self, texts: list, conditions, restaurants: list, subtype=None, notes=None):
         """回傳 (開場白, 每家的推薦理由 list)。LLM 不能用時，用資料中的事實組成理由。"""
         fallback = [("；".join(r.get("facts") or []) + "。") if r.get("facts") else ""
                     for r in restaurants]
@@ -637,7 +768,8 @@ class Pipe:
             raw = self._chat(
                 [
                     {"role": "system", "content": REASON_PROMPT},
-                    {"role": "user", "content": f"使用者需求：{need}\n條件：{cond}\n\n"
+                    {"role": "user", "content": f"使用者需求：{need}\n條件：{cond}\n"
+                                                f"系統說明：{'；'.join(notes or []) or '無'}\n\n"
                                                 f"餐廳資料：{json.dumps(data, ensure_ascii=False)}"},
                 ],
                 max_tokens=900,
@@ -654,14 +786,14 @@ class Pipe:
     # 主流程
     # ------------------------------------------------------------------
     @staticmethod
-    def describe_conditions(district, category, party_size, budget, source, subtype=None) -> str:
+    def describe_conditions(district, category, party_size, budget, source, subtype=None, note="") -> str:
         parts = [
             district or "不限地區",
             (f"{category}・{subtype}" if subtype else category) if category else "不限類別",
             f"{party_size} 人" if party_size else "人數不限",
             f"每人 {budget} 元內" if budget else "預算不限",
         ]
-        return f"🔎 搜尋條件：{'｜'.join(parts)}（{source}解析）"
+        return f"🔎 搜尋條件：{'｜'.join(parts)}（{source}解析{'・' + note if note else ''}）"
 
     @staticmethod
     def price_text(r: dict) -> str:
@@ -692,12 +824,33 @@ class Pipe:
         user_text = user_text if isinstance(user_text, str) else str(user_text)
 
         # 1. 解析用戶條件
-        conditions, source, total, subtype = self.get_conditions(messages)
+        conditions, source, info = self.get_conditions(messages)
         district, category, party_size, budget = conditions
+        total, subtype = info["total"], info["subtype"]
 
         # 問「有什麼類型可以選」→ 列出料理類型
         if self.is_category_question(user_text):
             return self.list_categories(conditions)
+
+        # 「不喜歡第 2 間」「吃過了」→ 找出是哪幾間
+        last_names = self.last_recommended(messages)
+        prev_msg = str(messages[-2].get("content", "")) if len(messages) >= 2 else ""
+        asked_which = prev_msg.startswith(f"{ASK_MARK}是哪一間呢")
+        rejects, reject_said = self.find_rejects(user_text, last_names, force=asked_which)
+        if not rejects and info["intent"] == "reject":
+            rejects = info["reject"]
+        new_search = any(self.parse_user_query(user_text)) or self.detect_subtype(user_text, None)
+        if reject_said and not rejects and last_names and not new_search:
+            if self.wants_more(user_text):
+                rejects = list(last_names)  # 「吃過了，換別的」→ 這批都不要
+            else:
+                return self.ask_which(last_names)
+
+        # 不是要新推薦（道謝、閒聊、問細節）→ LLM 自然回覆
+        if info["intent"] == "chat" and not rejects and not self.wants_more(user_text) and last_names:
+            reply = self.chat_reply(messages)
+            if reply:
+                return CHAT_MARK + reply
 
         # 資訊不足 → 繼續反問
         missing = self.should_ask(messages, conditions, total)
@@ -705,8 +858,12 @@ class Pipe:
             return self.ask_question(messages, conditions, missing, total, subtype)
 
         # 「推薦別的」→ 排除同樣條件下已經推薦過的店
-        condition_line = self.describe_conditions(district, category, party_size, budget, source, subtype)
-        exclude = self.shown_restaurants(messages, condition_line) if self.wants_more(user_text) else []
+        condition_line = self.describe_conditions(district, category, party_size, budget, source, subtype,
+                                                  info["llm_note"])
+        more = self.wants_more(user_text) or info["intent"] == "more"
+        shown = self.shown_restaurants(messages, condition_line) if more else []
+        rejected = list(dict.fromkeys(self.rejected_history(messages) + rejects))
+        exclude = list(dict.fromkeys(rejected + shown))
 
         # 2. 呼叫推薦 API
         payload = {
@@ -734,8 +891,10 @@ class Pipe:
             sections = []
             if self.valves.SHOW_CONDITIONS:
                 sections.append(condition_line)
-            if exclude:
-                sections.append(f"🔄 這個條件下的店都推薦過了（已推薦 {len(exclude)} 家）。")
+            if rejects:
+                sections.append(REJECTED_MARK + "".join(f"「{n}」" for n in rejects))
+            if shown:
+                sections.append(f"🔄 這個條件下的店都推薦過了（已推薦 {len(shown)} 家）。")
             else:
                 sections.append(data.get("result", "沒有取得有效的推薦結果。"))
             if tips:
@@ -743,16 +902,15 @@ class Pipe:
             return "\n\n".join(sections)
 
         # 3. 組合回答：條件 → 開場 → 每家餐廳（含推薦理由）
-        texts, _ = self.current_round(messages)
-        intro, reasons = self.write_reasons(texts, conditions, restaurants, subtype)
-
         sections = []
         if self.valves.SHOW_CONDITIONS:
             sections.append(condition_line)
         if total and party_size:
             sections.append(f"🧮 總預算 {total} 元 ÷ {party_size} 人 ≈ 每人 {budget} 元")
-        if exclude:
-            sections.append(f"🔄 換一批：已排除先前推薦過的 {len(exclude)} 家")
+        if rejects:
+            sections.append(REJECTED_MARK + "".join(f"「{n}」" for n in rejects))
+        if shown:
+            sections.append(f"🔄 換一批：已排除先前推薦過的 {len(shown)} 家")
         matched = data.get("matched", len(restaurants))
         relaxed = data.get("relaxed_budget")
         if budget and relaxed:
@@ -761,7 +919,7 @@ class Pipe:
                                 f"以下把預算稍微放寬到每人約 {relaxed} 元來找。")
             else:
                 sections.append(f"⚠️ 符合每人 {budget} 元預算的店只有 {matched} 家，"
-                                f"後面補上比預算稍微高一點（放寬到每人約 {relaxed} 元）的選擇。")
+                                f"另外補上比預算稍微高一點（放寬到每人約 {relaxed} 元）的選擇。")
         # 子類型：誠實說明哪些店看得出是這種、哪些只是一般同類別的店
         matched_subtype = data.get("matched_subtype")
         general = self.shop_label(category)  # 「一般的火鍋店」「一般的美式餐廳」
@@ -775,19 +933,32 @@ class Pipe:
                 sections.append(f"⚠️ 資料庫裡找不到{where}店名看得出是「{subtype}」的店，"
                                 f"以下先推薦一般的{general}，不一定有{subtype}。")
             elif shown_sub < len(restaurants):
-                sections.append(f"🏷️ 店名看得出是「{subtype}」的有 {shown_sub} 家，排在最前面；"
+                over_sub = sum(1 for r in restaurants if r.get("subtype_match") and r.get("budget_fit") == "over")
+                if over_sub == shown_sub:
+                    note = "（比預算稍微高一點）"
+                elif over_sub:
+                    note = f"（其中 {over_sub} 家比預算稍微高一點）"
+                else:
+                    note = ""
+                sections.append(f"🏷️ 店名看得出是「{subtype}」的有 {shown_sub} 家，排在最前面{note}；"
                                 f"後面是一般的{general}，不一定有{subtype}。")
+        # LLM 開場白：把上面的系統說明一起告訴 LLM，讓它自然地帶到
+        texts, _ = self.current_round(messages)
+        notes = [line for line in sections if line.startswith(("🚫", "🔄", "⚠️", "🏷️", "🧮"))]
+        intro, reasons = self.write_reasons(texts, conditions, restaurants, subtype, notes)
         if intro:
             sections.append(f"💬 {intro}")
         blocks = []
         for i, (r, reason) in enumerate(zip(restaurants, reasons), 1):
             prev = restaurants[i - 2] if i > 1 else None
+            is_over = r.get("budget_fit") == "over"
             # 子類型的店之後，接著是一般同類別的店 → 加分隔標題
-            if (subtype and prev and prev.get("subtype_match") and not r.get("subtype_match")
-                    and r.get("budget_fit") != "over"):
-                blocks.append(f"🍽️ **以下是一般的{general}（店名看不出是不是{subtype}）**")
-            # 前面有符合預算的店時，才需要分隔標題（第一家就超過預算時，開頭的 ⚠️ 已經說明）
-            if r.get("budget_fit") == "over" and i > 1 and restaurants[i - 2].get("budget_fit") != "over":
+            if subtype and prev and prev.get("subtype_match") and not r.get("subtype_match"):
+                extra = "，比預算稍微高一點" if is_over else ""
+                blocks.append(f"🍽️ **以下是一般的{general}（店名看不出是不是{subtype}{extra}）**")
+            # 一般的店裡，預算內的店之後接著是比預算稍微高一點的店
+            elif (is_over and prev and prev.get("budget_fit") != "over"
+                  and not (subtype and r.get("subtype_match"))):
                 blocks.append(f"💸 **以下是比預算稍微高一點的選擇（放寬到每人約 {relaxed or '更高'} 元）**")
             blocks.append(self.format_card(i, r, reason))
         sections.append("\n\n---\n\n".join(blocks))

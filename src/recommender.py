@@ -138,6 +138,19 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
         else:
             relaxed_budget = None
 
+    # 有指定子類型、但預算內沒有這種店：預算一點一點往上加，找看看有沒有稍微超過預算的
+    if budget and kw and not name_matches(df, kw).any():
+        for factor in RELAX_STEPS:
+            cap = int(math.ceil(budget * factor / 50) * 50)
+            extra = apply_filters(all_df, district, category, party_size, cap, cross_kw)
+            extra = extra[name_matches(extra, kw) & ~extra["place_id"].isin(df["place_id"])]
+            if len(extra):
+                extra = extra.copy()
+                extra["budget_fit"] = "over"
+                df = pd.concat([df, extra])
+                relaxed_budget = max(relaxed_budget or 0, cap)
+                break
+
     if df.empty:
         return None, "⚠️ 沒有找到符合條件的餐廳，建議放寬預算或地區條件！"
 
@@ -149,11 +162,12 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     df["_over_order"] = df["min_price"].where(df["budget_fit"] == "over", 0)
     df["over_by"] = (df["min_price"] - budget).clip(lower=0).where(df["budget_fit"] == "over") \
         if budget else None
-    # 子類型：店名看得出是這種的店排前面（但預算內的店仍然在超出預算的店前面）
+    # 子類型優先：店名看得出是這種的店一定排最前面（就算比預算稍微高一點），
+    # 接著是一般同類別的店（預算內 → 比預算稍微高一點）
     df["subtype_match"] = name_matches(df, kw) if kw else False
     df["_over"] = (df["budget_fit"] == "over").astype(int)
     df["_sub_order"] = (~df["subtype_match"]).astype(int)
-    df = df.sort_values(by=["_over", "_sub_order", "_fit_order", "_over_order", "score"],
+    df = df.sort_values(by=["_sub_order", "_over", "_fit_order", "_over_order", "score"],
                         ascending=[True, True, True, True, False])
 
     results = df.head(top_n).copy()
