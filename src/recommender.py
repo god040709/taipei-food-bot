@@ -97,35 +97,22 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
         return None, f"❌ 找不到資料庫檔案：{DF_PATH}，請確認是否已執行採集腳本。"
 
     try:
-        df = load_data()
+        all_df = load_data()
     except Exception as e:
         return None, f"❌ 資料庫讀取失敗: {e}"
 
-    # 1. 行政區篩選
-    if district and district != "全區":
-        df = df[df['district'].str.contains(district, regex=False, na=False)]
-
-    # 2. 料理類別篩選
-    if category and category != "不限":
-        df = df[df['category'].str.contains(category, regex=False, na=False)]
-
-    # 3. 人數篩選
-    if party_size:
-        df = df[(df['min_party'] <= party_size) & (df['max_party'] >= party_size)]
-
-    # 4. 預算篩選：預算是「每人上限」
-    #    within  = 整個價格區間都在預算內（最高價 ≤ 預算）→ 優先推薦
-    #    partial = 最低價低於預算、最高價超過預算 → 只在不夠 5 家時補上，並標示
-    #    最低價 ≥ 預算的店（例如預算 800、店家 800~1000）不推薦
+    df = apply_filters(all_df, district, category, party_size, budget)
     if budget:
-        df = df[df['min_price'] < budget].copy()
         df["budget_fit"] = (df["max_price"] <= budget).map({True: "within", False: "partial"})
     else:
-        df = df.copy()
         df["budget_fit"] = ""
 
+    # 結果不到 top_n 家：算出放寬哪個條件可以多找到幾家
+    alternatives = suggest_relaxations(all_df, district, category, party_size, budget) \
+        if len(df) < top_n else []
+
     if df.empty:
-        return None, "⚠️ 沒有找到完全符合條件的餐廳，建議放寬預算或地區條件！"
+        return None, "⚠️ 沒有找到符合條件的餐廳，建議放寬預算或地區條件！"
 
     # 5. 依加權推薦指數排序（完全在預算內的店一定排在前面）
     parts = score_components(df, budget)
@@ -139,7 +126,56 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     results["facts"] = results.apply(lambda r: describe_facts(r, budget), axis=1)
     results.attrs["matched"] = len(df)  # 符合條件的餐廳總數
     results.attrs["matched_within"] = int((df["budget_fit"] == "within").sum()) if budget else len(df)
+    results.attrs["alternatives"] = alternatives
     return results, None
+
+
+def apply_filters(df, district=None, category=None, party_size=None, budget=None):
+    """依條件篩選。預算是「每人上限」：
+    - within  = 整個價格區間都在預算內（最高價 ≤ 預算）→ 優先推薦
+    - partial = 最低價低於預算、最高價超過預算 → 排在後面，並標示
+    - 最低價 ≥ 預算的店（例如預算 800、店家 800~1000）不推薦"""
+    if district and district != "全區":
+        df = df[df['district'].str.contains(district, regex=False, na=False)]
+    if category and category != "不限":
+        df = df[df['category'].str.contains(category, regex=False, na=False)]
+    if party_size:
+        df = df[(df['min_party'] <= party_size) & (df['max_party'] >= party_size)]
+    if budget:
+        df = df[df['min_price'] < budget]
+    return df.copy()
+
+
+def relaxations_for(district=None, category=None, party_size=None, budget=None):
+    """給 API 在「完全沒有結果」時使用。"""
+    try:
+        return suggest_relaxations(load_data(), district, category, party_size, budget)
+    except Exception:
+        return []
+
+
+def suggest_relaxations(df, district, category, party_size, budget):
+    """結果太少時，建議放寬的方式，例如「不限地區 → 64 家」「預算 500 → 5 家」。"""
+    current = len(apply_filters(df, district, category, party_size, budget))
+    options = []
+    if district:
+        n = len(apply_filters(df, None, category, party_size, budget))
+        if n > current:
+            options.append({"reply": "不限地區", "text": f"全台北有 {n} 家符合", "count": n})
+    if budget:
+        for factor in (1.5, 2, 3):
+            new_budget = int(math.ceil(budget * factor / 100) * 100)
+            n = len(apply_filters(df, district, category, party_size, new_budget))
+            if n > current:
+                where = district or "全台北"
+                options.append({"reply": f"預算 {new_budget}", "text": f"{where}有 {n} 家符合", "count": n})
+                break
+    if category:
+        n = len(apply_filters(df, district, None, party_size, budget))
+        if n > current:
+            where = district or "全台北"
+            options.append({"reply": "類型都可以", "text": f"{where}各種料理共 {n} 家符合", "count": n})
+    return options
 
 
 def describe_facts(row, budget=None):

@@ -9,26 +9,30 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
-from src.recommender import search_restaurants, format_results, to_records  # noqa: E402
+from src.recommender import search_restaurants, format_results, to_records, relaxations_for  # noqa: E402
 
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "5000"))
 
 
 def handle_recommend(data: dict) -> dict:
-    results, error = search_restaurants(
+    conditions = dict(
         district=data.get("district"),
         category=data.get("category"),
         party_size=data.get("party_size"),
         budget=data.get("budget"),
     )
+    results, error = search_restaurants(**conditions)
     if error:
-        return {"result": error, "restaurants": []}
+        return {"result": error, "restaurants": [], "matched": 0,
+                "alternatives": relaxations_for(**conditions)}
     # result：顯示用文字；restaurants：結構化資料，給 LLM 寫推薦理由
     # matched：符合條件的餐廳總數；matched_within：價格完全在預算內的家數
+    # alternatives：結果太少時，放寬條件的建議
     return {"result": format_results(results), "restaurants": to_records(results),
             "matched": results.attrs.get("matched", len(results)),
-            "matched_within": results.attrs.get("matched_within", len(results))}
+            "matched_within": results.attrs.get("matched_within", len(results)),
+            "alternatives": results.attrs.get("alternatives", [])}
 
 
 try:

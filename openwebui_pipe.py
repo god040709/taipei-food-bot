@@ -235,10 +235,12 @@ class Pipe:
             party_size = to_number(party_match.group(1))
 
         # 預算：「預算1000」「預算一千」「1000元」「500以內」「一人500」「每人一千」「1k」
+        filler = r"\s*(?:大概|大約|約|差不多|抓|在|是|最多|頂多|上限|不超過|：|:)*\s*"
         budget_patterns = [
-            r"預算\s*" + NUM,
-            r"(?:一人|每人|每位|一位)\s*" + NUM,
+            r"預算" + filler + NUM,
+            r"(?:一人|每人|每位|一位)" + filler + NUM,
             NUM + r"\s*(?:元|塊|以內|以下)",
+            NUM + r"\s*(?:元|塊)?\s*(?:左右|上下)",
             r"(\d+(?:\.\d+)?\s*[kK])",
         ]
         for pattern in budget_patterns:
@@ -296,10 +298,33 @@ class Pipe:
         texts.reverse()
         return texts, asks
 
+    @staticmethod
+    def previous_conditions(messages: list):
+        """上一次推薦用的條件（從回答第一行「🔎 搜尋條件：…」讀回來），沒有就回傳 None。
+        讓使用者推薦完之後可以說「不限地區」「預算 500」「換成燒肉」來修改搜尋。"""
+        for m in reversed(messages[:-1]):
+            content = m.get("content", "")
+            if m.get("role") != "assistant" or not isinstance(content, str):
+                continue
+            if content.startswith(ASK_MARK):
+                continue
+            match = re.search(r"🔎 搜尋條件：(.+?)（", content)
+            if not match:
+                return None
+            parts = match.group(1).split("｜")
+            district = next((p for p in parts if p in DISTRICTS), None)
+            category = next((p for p in parts if p in CATEGORIES), None)
+            party = re.search(r"(\d+) 人", match.group(1))
+            budget = re.search(r"每人 (\d+) 元內", match.group(1))
+            return (district, category,
+                    int(party.group(1)) if party else None,
+                    int(budget.group(1)) if budget else None)
+        return None
+
     def parse_rounds(self, messages: list):
         """規則解析多輪：機器人反問後，把使用者這幾次的回答合併起來。"""
         texts, _ = self.current_round(messages)
-        merged = [None, None, None, None]
+        merged = list(self.previous_conditions(messages) or [None, None, None, None])
         for i, text in enumerate(texts):
             parsed = list(self.parse_user_query(text))
             # 回答反問時，單獨一個數字（例如「800」）視為每人預算
@@ -314,12 +339,19 @@ class Pipe:
 
     def get_conditions(self, messages: list):
         """回傳 (條件 tuple, 解析方式)。"""
+        conditions, source = None, "規則"
         if self.valves.USE_LLM_PARSER and self._llm_enabled():
             try:
-                return self.parse_with_llm(messages), "LLM"
+                conditions, source = self.parse_with_llm(messages), "LLM"
             except Exception:
                 pass  # LLM 失敗時退回規則解析
-        return self.parse_rounds(messages), "規則"
+        if conditions is None:
+            conditions = self.parse_rounds(messages)
+        # 使用者說「不限地區」「預算不限」→ 那一項清空
+        texts, _ = self.current_round(messages)
+        waived = self.waived_fields(texts)
+        conditions = tuple(None if f in waived else v for f, v in zip(FIELDS, conditions))
+        return conditions, source
 
     # ------------------------------------------------------------------
     # 資訊不足時持續反問
@@ -474,9 +506,16 @@ class Pipe:
             return f"❌ 無法連線至本機推薦 API 服務，請確認 `python api.py` 是否已啟動。\n錯誤訊息: {e}"
 
         restaurants = data.get("restaurants", [])
+        tips = self.describe_alternatives(conditions, len(restaurants), data.get("alternatives") or [])
         if not restaurants or "maps_url" not in restaurants[0]:
             # 沒有結果，或 api.py 還是舊版：直接顯示 API 的文字
-            return data.get("result", "沒有取得有效的推薦結果。")
+            sections = []
+            if self.valves.SHOW_CONDITIONS:
+                sections.append(self.describe_conditions(district, category, party_size, budget, source))
+            sections.append(data.get("result", "沒有取得有效的推薦結果。"))
+            if tips:
+                sections.append(tips)
+            return "\n\n".join(sections)
 
         # 3. 組合回答：條件 → 開場 → 每家餐廳（含推薦理由）
         texts, _ = self.current_round(messages)
@@ -486,7 +525,10 @@ class Pipe:
         if self.valves.SHOW_CONDITIONS:
             sections.append(self.describe_conditions(district, category, party_size, budget, source))
         within = data.get("matched_within", len(restaurants))
-        if budget and within < len(restaurants):
+        if budget and within == 0:
+            sections.append(f"⚠️ 沒有價格完全在每人 {budget} 元內的店，"
+                            "以下是最低消費在預算內、但部分餐點可能超出預算的選擇。")
+        elif budget and within < len(restaurants):
             sections.append(f"⚠️ 完全在每人 {budget} 元內的店只有 {within} 家，"
                             "後面幾家的部分餐點可能超出預算。")
         if intro:
@@ -494,4 +536,18 @@ class Pipe:
         cards = [self.format_card(i, r, reason)
                  for i, (r, reason) in enumerate(zip(restaurants, reasons), 1)]
         sections.append("\n\n---\n\n".join(cards))
+        if tips:
+            sections.append(tips)
         return "\n\n".join(sections)
+
+    @staticmethod
+    def describe_alternatives(conditions, found: int, alternatives: list) -> str:
+        """結果不到 5 家時，告訴使用者可以怎麼放寬條件。"""
+        if not alternatives:
+            return ""
+        district = conditions[0]
+        where = district or "目前條件下"
+        lines = ["---", f"💡 {where}符合的只有 {found} 家（資料庫裡的店家數有限）。想看更多選擇，可以直接回覆："]
+        for alt in alternatives:
+            lines.append(f"- 「{alt['reply']}」→ {alt['text']}")
+        return "\n".join(lines)
