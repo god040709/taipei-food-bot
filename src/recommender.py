@@ -23,7 +23,7 @@ RELAX_STEPS = (1.2, 1.5, 2.0)
 
 # 從店名看得出來的特色
 NAME_KEYWORDS = {
-    "吃到飽": "吃到飽", "和牛": "主打和牛", "寵物友善": "寵物友善", "石頭": "石頭鍋",
+    "吃到飽": "吃到飽", "和牛": "和牛", "寵物友善": "寵物友善", "石頭": "石頭鍋",
     "麻辣": "麻辣鍋", "酸菜白肉": "酸菜白肉鍋", "壽喜燒": "壽喜燒", "海鮮": "海鮮",
     "蔬食": "蔬食", "素食": "素食", "24H": "24 小時營業", "24小時": "24 小時營業",
     "旗艦": "旗艦店", "本店": "本店", "總店": "總店", "老店": "老店", "餐酒": "可小酌",
@@ -95,9 +95,13 @@ def load_data():
 
 
 def search_restaurants(district=None, category=None, party_size=None, budget=None, top_n=5,
-                       exclude=None):
+                       exclude=None, subtype=None, subtype_keywords=None, subtype_cross=False):
     """篩選並排序餐廳。回傳 (DataFrame, None)；失敗或沒結果時回傳 (None, 錯誤訊息)。
-    exclude：要排除的餐廳名稱（使用者說「推薦別的」時，排除已經推薦過的店）。"""
+    exclude：要排除的餐廳名稱（使用者說「推薦別的」時，排除已經推薦過的店）。
+    subtype / subtype_keywords：子類型（例如「壽喜燒」）與店名關鍵字。
+        店名含關鍵字的店排在前面，其他同類別的店排在後面。
+    subtype_cross：True 時，別的類別裡店名含關鍵字的店也算進來（例如被分在「燒肉」的壽喜燒店）。
+        關鍵字太廣的子類型（例如「麵」）設 False，只在原本類別裡比對。"""
     if not os.path.exists(DF_PATH):
         return None, f"❌ 找不到資料庫檔案：{DF_PATH}，請確認是否已執行採集腳本。"
 
@@ -108,7 +112,9 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     if exclude:
         all_df = all_df[~all_df["name"].isin(exclude)]
 
-    df = apply_filters(all_df, district, category, party_size, budget)
+    kw = subtype_keywords or []
+    cross_kw = kw if subtype_cross else None  # 用來把別的類別的店也納入
+    df = apply_filters(all_df, district, category, party_size, budget, cross_kw)
     if budget:
         df["budget_fit"] = (df["max_price"] <= budget).map({True: "within", False: "partial"})
     else:
@@ -120,7 +126,7 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     if budget and matched < top_n:
         for factor in RELAX_STEPS:
             cap = int(math.ceil(budget * factor / 50) * 50)
-            extra = apply_filters(all_df, district, category, party_size, cap)
+            extra = apply_filters(all_df, district, category, party_size, cap, cross_kw)
             extra = extra[~extra["place_id"].isin(df["place_id"])]
             relaxed_budget = cap
             if matched + len(extra) >= top_n or factor == RELAX_STEPS[-1]:
@@ -143,12 +149,24 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     df["_over_order"] = df["min_price"].where(df["budget_fit"] == "over", 0)
     df["over_by"] = (df["min_price"] - budget).clip(lower=0).where(df["budget_fit"] == "over") \
         if budget else None
-    df = df.sort_values(by=["_fit_order", "_over_order", "score"], ascending=[True, True, False])
+    # 子類型：店名看得出是這種的店排前面（但預算內的店仍然在超出預算的店前面）
+    df["subtype_match"] = name_matches(df, kw) if kw else False
+    df["_over"] = (df["budget_fit"] == "over").astype(int)
+    df["_sub_order"] = (~df["subtype_match"]).astype(int)
+    df = df.sort_values(by=["_over", "_sub_order", "_fit_order", "_over_order", "score"],
+                        ascending=[True, True, True, True, False])
 
     results = df.head(top_n).copy()
     has_within = bool((results["budget_fit"] == "within").any())
     results["maps_url"] = results.apply(maps_link, axis=1)
     results["facts"] = results.apply(lambda r: describe_facts(r, budget, has_within), axis=1)
+    if subtype:
+        results["facts"] = [
+            ([f"店名看得出是{subtype}"] + [f for f in facts if not f.startswith("店名特色")]
+             + [f for f in facts if f.startswith("店名特色") and subtype not in f]) if match else facts
+            for facts, match in zip(results["facts"], results["subtype_match"])
+        ]
+    results.attrs["matched_subtype"] = int(df["subtype_match"].sum()) if kw else None
     results.attrs["matched"] = matched
     results.attrs["matched_within"] = int((df["budget_fit"] == "within").sum()) if budget else matched
     results.attrs["relaxed_budget"] = relaxed_budget if (results["budget_fit"] == "over").any() else None
@@ -158,7 +176,16 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     return results, None
 
 
-def apply_filters(df, district=None, category=None, party_size=None, budget=None):
+def name_matches(df, keywords):
+    """店名是否含任一關鍵字（不分大小寫）。"""
+    names = df["name"].astype(str).str.lower()
+    mask = pd.Series(False, index=df.index)
+    for k in keywords:
+        mask |= names.str.contains(k.lower(), regex=False)
+    return mask
+
+
+def apply_filters(df, district=None, category=None, party_size=None, budget=None, name_keywords=None):
     """依條件篩選。預算是「每人上限」：
     價格區間（min_price ~ max_price）是 Google 的「多數人用餐花費」區間，不是最低／最高消費。
     - within  = 多數人的花費都在預算內（區間上限 ≤ 預算）→ 優先推薦
@@ -168,7 +195,11 @@ def apply_filters(df, district=None, category=None, party_size=None, budget=None
     if district and district != "全區":
         df = df[df['district'].str.contains(district, regex=False, na=False)]
     if category and category != "不限":
-        df = df[df['category'].str.contains(category, regex=False, na=False)]
+        in_category = df['category'].str.contains(category, regex=False, na=False)
+        if name_keywords:
+            # 子類型：店名含關鍵字的店，就算原本被分在別的類別也算（例如壽喜燒店被分在燒肉）
+            in_category |= name_matches(df, name_keywords)
+        df = df[in_category]
     if party_size:
         df = df[(df['min_party'] <= party_size) & (df['max_party'] >= party_size)]
     if budget:
@@ -228,7 +259,7 @@ def describe_facts(row, budget=None, has_within=True):
         if word.lower() in name.lower() and tag not in tags:
             tags.append(tag)
     if tags:
-        facts.append("店名主打" + "、".join(tags))
+        facts.append("店名特色：" + "、".join(tags))
 
     if row["group_size"] >= 3 and row["review_rank"] <= 3:
         facts.append(f"{row['district']}{row['category']}中評論數第 {row['review_rank']} 多"
@@ -295,7 +326,7 @@ def to_records(results):
     """給 Pipe 顯示與 LLM 寫推薦理由用的資料。"""
     cols = ["name", "district", "category", "rating", "user_ratings_total",
             "min_price", "max_price", "score", "address", "maps_url", "budget_fit",
-            "over_by", "facts", "summary", "highlights", "reviews"]
+            "over_by", "subtype_match", "facts", "summary", "highlights", "reviews"]
     cols = [c for c in cols if c in results.columns]
     records = [{k: (v.item() if hasattr(v, "item") else v) for k, v in r.items()}
                for r in results[cols].to_dict(orient="records")]

@@ -28,7 +28,11 @@ def handle_recommend(data: dict) -> dict:
         budget=data.get("budget"),
     )
     exclude = data.get("exclude") or []  # 已經推薦過、這次要排除的店名
-    results, error = search_restaurants(**conditions, exclude=exclude)
+    # subtype：子類型（例如「壽喜燒」），subtype_keywords：用來比對店名的關鍵字
+    results, error = search_restaurants(**conditions, exclude=exclude,
+                                        subtype=data.get("subtype"),
+                                        subtype_keywords=data.get("subtype_keywords") or [],
+                                        subtype_cross=bool(data.get("subtype_cross")))
     if error:
         return {"result": error, "restaurants": [], "matched": 0,
                 "alternatives": relaxations_for(**conditions, exclude=exclude)}
@@ -40,7 +44,9 @@ def handle_recommend(data: dict) -> dict:
             "matched_within": results.attrs.get("matched_within", len(results)),
             "alternatives": results.attrs.get("alternatives", []),
             # relaxed_budget：符合預算的店不夠時，放寬到的預算（後面補上的店標示為 over）
-            "relaxed_budget": results.attrs.get("relaxed_budget")}
+            "relaxed_budget": results.attrs.get("relaxed_budget"),
+            # matched_subtype：店名看得出是這個子類型的家數（沒有指定子類型時是 None）
+            "matched_subtype": results.attrs.get("matched_subtype")}
 
 
 def handle_categories(data: dict) -> dict:

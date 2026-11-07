@@ -80,7 +80,7 @@ JSON 格式：
    - 「大安」「信義」這類省略「區」的說法要補成完整名稱。
    - 提到地標時，只有在非常確定所屬行政區時才填（例如「士林夜市」→士林區），不確定就填 null。
 2. category 只能是以下其中之一，或 null：{"、".join(CATEGORIES)}
-   - 同義詞要對應：麻辣鍋/涮涮鍋→火鍋、日本料理/壽司→日式料理、韓國菜→韓式料理、
+   - 同義詞要對應：麻辣鍋/涮涮鍋/壽喜燒/羊肉爐→火鍋、日本料理/壽司→日式料理、韓國菜→韓式料理、
      泰國菜→泰式料理、義大利麵/披薩→義式料理、小吃/夜市→平價小吃、早餐→早午餐、
      蛋糕/下午茶→甜點、喝酒/調酒→酒吧、中菜/合菜→中式餐廳、漢堡/牛排→美式餐廳。
 3. party_size 是用餐人數（整數）。「我們兩個」=2、「一個人」=1、「三個人」=3。沒提到就 null。
@@ -131,6 +131,69 @@ QUESTIONS = {
     "budget": "每人預算上限大概多少？（例如：300、500、1000）",
 }
 LABELS = {"district": "地區", "category": "類型", "party_size": "人數", "budget": "預算"}
+
+# 子類型：大類別裡更細的種類。資料集只有 14 個大類，子類型是「從店名判斷」的：
+#   子類型: (所屬類別, 使用者會說的詞, 店名關鍵字, 是否跨類別比對)
+# 「是否跨類別比對」= True：別的類別裡店名有關鍵字的店也算（例如被分在「燒肉」的壽喜燒店）；
+#   關鍵字太廣（例如「韓」「麵」）的設 False，只在原本類別裡比對。
+SUBTYPES = {
+    # 火鍋
+    "麻辣鍋": ("火鍋", ["麻辣鍋", "麻辣火鍋", "麻辣"], ["麻辣"], True),
+    "壽喜燒": ("火鍋", ["壽喜燒", "壽喜鍋", "sukiyaki"], ["壽喜燒", "壽喜鍋", "すき焼", "sukiyaki"], True),
+    "涮涮鍋": ("火鍋", ["涮涮鍋", "shabu"], ["涮涮", "shabu", "しゃぶ"], True),
+    "石頭火鍋": ("火鍋", ["石頭鍋", "石頭火鍋"], ["石頭"], True),
+    "酸菜白肉鍋": ("火鍋", ["酸菜白肉"], ["酸菜白肉", "酸白菜"], True),
+    "羊肉爐": ("火鍋", ["羊肉爐"], ["羊肉爐"], True),
+    "薑母鴨": ("火鍋", ["薑母鴨"], ["薑母鴨"], True),
+    "鴛鴦鍋": ("火鍋", ["鴛鴦鍋"], ["鴛鴦"], False),
+    "海鮮鍋": ("火鍋", ["海鮮鍋"], ["海鮮"], False),
+    "個人小火鍋": ("火鍋", ["小火鍋", "個人鍋"], ["小火鍋", "個人鍋", "個人"], False),
+    # 燒肉
+    "韓式烤肉": ("燒肉", ["韓式烤肉", "韓國烤肉", "韓式燒肉"], ["韓式", "韓國", "韓"], False),
+    # 日式料理
+    "壽司": ("日式料理", ["壽司", "sushi"], ["壽司", "鮨", "sushi", "すし"], True),
+    "丼飯": ("日式料理", ["丼飯", "丼"], ["丼"], True),
+    "居酒屋": ("日式料理", ["居酒屋"], ["居酒屋"], True),
+    "無菜單料理": ("日式料理", ["無菜單", "omakase"], ["無菜單", "omakase", "おまかせ"], True),
+    "鰻魚飯": ("日式料理", ["鰻魚"], ["鰻"], True),
+    "炸豬排": ("日式料理", ["炸豬排", "豬排"], ["豬排", "とんかつ"], True),
+    "燒鳥": ("日式料理", ["燒鳥", "串燒"], ["燒鳥", "串燒", "串焼"], True),
+    "鐵板燒": ("日式料理", ["鐵板燒"], ["鐵板燒"], True),
+    "定食": ("日式料理", ["定食"], ["定食"], False),
+    # 拉麵
+    "沾麵": ("拉麵", ["沾麵"], ["沾麵", "つけ麺"], True),
+    "豚骨拉麵": ("拉麵", ["豚骨"], ["豚骨"], False),
+    "雞白湯拉麵": ("拉麵", ["雞白湯"], ["雞白湯", "鶏白湯"], False),
+    # 義式料理
+    "披薩": ("義式料理", ["披薩", "pizza"], ["披薩", "pizza"], True),
+    "義大利麵": ("義式料理", ["義大利麵", "pasta"], ["義大利麵", "pasta", "麵"], False),
+    # 美式餐廳
+    "漢堡": ("美式餐廳", ["漢堡", "burger"], ["漢堡", "burger"], True),
+    "牛排": ("美式餐廳", ["牛排", "steak"], ["牛排", "steak"], True),
+    "炸雞": ("美式餐廳", ["炸雞"], ["炸雞", "chicken"], False),
+    # 韓式料理
+    "韓式炸雞": ("韓式料理", ["韓式炸雞", "韓國炸雞"], ["炸雞", "chicken"], False),
+    "部隊鍋": ("韓式料理", ["部隊鍋"], ["部隊鍋"], True),
+    # 中式餐廳
+    "港式": ("中式餐廳", ["港式", "飲茶", "茶餐廳", "港點"], ["港式", "茶餐廳", "飲茶", "點心", "粵"], True),
+    "台菜": ("中式餐廳", ["台菜", "台式料理"], ["台菜", "台式"], False),
+    "熱炒": ("中式餐廳", ["熱炒", "快炒"], ["熱炒", "快炒"], True),
+    "川菜": ("中式餐廳", ["川菜", "四川菜", "川味"], ["川菜", "川味", "四川", "成都", "重慶"], False),
+    "江浙菜": ("中式餐廳", ["江浙菜", "上海菜"], ["江浙", "上海", "杭州"], False),
+    "烤鴨": ("中式餐廳", ["烤鴨"], ["烤鴨"], True),
+    # 平價小吃
+    "牛肉麵": ("平價小吃", ["牛肉麵"], ["牛肉麵"], True),
+    "滷肉飯": ("平價小吃", ["滷肉飯", "魯肉飯"], ["滷肉飯", "魯肉飯"], True),
+    "水餃": ("平價小吃", ["水餃", "餃子", "鍋貼"], ["水餃", "餃子", "鍋貼"], True),
+    "臭豆腐": ("平價小吃", ["臭豆腐"], ["臭豆腐"], True),
+    # 甜點
+    "蛋糕": ("甜點", ["蛋糕"], ["蛋糕", "cake"], True),
+    "冰品": ("甜點", ["冰品", "剉冰", "雪花冰", "刨冰"], ["冰"], False),
+    "豆花": ("甜點", ["豆花"], ["豆花"], True),
+    "鬆餅": ("甜點", ["鬆餅"], ["鬆餅", "pancake", "waffle"], True),
+    # 酒吧
+    "精釀啤酒": ("酒吧", ["精釀", "啤酒"], ["精釀", "啤酒", "beer", "brew"], False),
+}
 
 # 總預算的說法：「總預算1500」「總共1500」「全部加起來 2000」→ 會除以人數換算成每人預算
 TOTAL_RE = r"(?:總預算|預算總共|預算一共|預算合計|全部加起來|加起來|總共|總計|一共|合計)"
@@ -326,7 +389,7 @@ class Pipe:
                 return None
             parts = match.group(1).split("｜")
             district = next((p for p in parts if p in DISTRICTS), None)
-            category = next((p for p in parts if p in CATEGORIES), None)
+            category = next((p.split("・")[0] for p in parts if p.split("・")[0] in CATEGORIES), None)
             party = re.search(r"(\d+) 人", match.group(1))
             budget = re.search(r"每人 (\d+) 元內", match.group(1))
             return (district, category,
@@ -351,6 +414,28 @@ class Pipe:
         return tuple(merged)
 
     @staticmethod
+    def previous_subtype(messages: list) -> Optional[str]:
+        """上一次推薦的子類型（「🔎 搜尋條件：…｜火鍋・壽喜燒｜…」），沒有就回傳 None。"""
+        for m in reversed(messages[:-1]):
+            content = m.get("content", "")
+            if m.get("role") != "assistant" or not isinstance(content, str) or content.startswith(ASK_MARK):
+                continue
+            match = re.search(r"🔎 搜尋條件：[^（]*?・([^｜（]+)", content)
+            return match.group(1) if match and match.group(1) in SUBTYPES else None
+        return None
+
+    @staticmethod
+    def detect_subtype(text: str, category: Optional[str]) -> Optional[str]:
+        """從一句話找出子類型。同時符合多個時，優先選屬於 category 的，再選說法比較長的。"""
+        lower = text.lower()
+        found = []
+        for name, (parent, triggers, _, _) in SUBTYPES.items():
+            hit = max((len(t) for t in triggers if t.lower() in lower), default=0)
+            if hit:
+                found.append((parent == category, hit, name))
+        return max(found)[2] if found else None
+
+    @staticmethod
     def total_budget(texts: list) -> Optional[int]:
         """這次需求裡提到的「總預算」（不是每人），沒有就回傳 None。"""
         for text in reversed(texts):
@@ -360,7 +445,7 @@ class Pipe:
         return None
 
     def get_conditions(self, messages: list):
-        """回傳 (條件 tuple, 解析方式, 總預算)。總預算會除以人數，換算成每人預算。"""
+        """回傳 (條件 tuple, 解析方式, 總預算, 子類型)。總預算會除以人數，換算成每人預算。"""
         conditions, source = None, "規則"
         if self.valves.USE_LLM_PARSER and self._llm_enabled():
             try:
@@ -380,7 +465,28 @@ class Pipe:
             district, category, party_size, _ = conditions
             budget = total // party_size if party_size else None
             conditions = (district, category, party_size, budget)
-        return conditions, source, total
+
+        # 子類型（例如「壽喜燒」）：這次需求有提到就用；沒提到就沿用上一次的（類別沒換的話）
+        district, category, party_size, budget = conditions
+        subtype = None
+        for text in reversed(texts):
+            subtype = self.detect_subtype(text, category)
+            if subtype:
+                break
+        if subtype is None:
+            prev = self.previous_subtype(messages)
+            if prev and SUBTYPES[prev][0] == category:
+                subtype = prev
+        if subtype:
+            parent = SUBTYPES[subtype][0]
+            if category in (None, parent):
+                category = parent  # 「想吃壽喜燒」→ 類別是火鍋
+            elif any(category in t for t in texts[-1:]):
+                subtype = None  # 這次明確說了別的類別（例如「換成拉麵」）
+            else:
+                category = parent
+        conditions = (district, category, party_size, budget)
+        return conditions, source, total, subtype
 
     # ------------------------------------------------------------------
     # 資訊不足時持續反問
@@ -417,13 +523,15 @@ class Pipe:
             waived.add("budget")  # 已經有總預算，問到人數就能換算
         return [f for f, v in zip(FIELDS, conditions) if v is None and f not in waived]
 
-    def ask_question(self, messages: list, conditions, missing: list, total=None) -> str:
+    def ask_question(self, messages: list, conditions, missing: list, total=None, subtype=None) -> str:
         texts, asks = self.current_round(messages)
         waived = self.waived_fields(texts)
         known = []
         for field, value in zip(FIELDS, conditions):
             if field == "budget" and total:
                 known.append(f"總預算 {total} 元")
+            elif field == "category" and value and subtype:
+                known.append(f"{value}・{subtype}")
             elif value is not None:
                 known.append({"party_size": f"{value} 人", "budget": f"每人 {value} 元內"}.get(field, value))
             elif field in waived:
@@ -451,6 +559,8 @@ class Pipe:
     def is_category_question(text: str) -> bool:
         if any(c in text for c in CATEGORIES):
             return False  # 已經說了想吃的類型，例如「有什麼火鍋推薦」
+        if any(t.lower() in text.lower() for _, triggers, _, _ in SUBTYPES.values() for t in triggers):
+            return False  # 說了子類型，例如「有什麼壽喜燒」
         if any(w in text for words in FIELD_SKIP_WORDS.values() for w in words):
             return False  # 「什麼都可以吃」是「不限」，不是在問
         return re.search(CATEGORY_QUESTION_RE, text) is not None
@@ -507,7 +617,7 @@ class Pipe:
     # ------------------------------------------------------------------
     # 推薦理由（每家一段，寫餐廳特色）
     # ------------------------------------------------------------------
-    def write_reasons(self, texts: list, conditions, restaurants: list):
+    def write_reasons(self, texts: list, conditions, restaurants: list, subtype=None):
         """回傳 (開場白, 每家的推薦理由 list)。LLM 不能用時，用資料中的事實組成理由。"""
         fallback = [("；".join(r.get("facts") or []) + "。") if r.get("facts") else ""
                     for r in restaurants]
@@ -517,7 +627,10 @@ class Pipe:
         need = "；".join(texts[-4:])
         cond = (f"地區={district or '不限'}，類型={category or '不限'}，"
                 f"人數={party_size or '不限'}，每人預算上限={budget or '不限'}")
-        keys = ["name", "category", "min_price", "max_price",
+        if subtype:
+            cond += (f"，想吃的子類型={subtype}（subtype_match=true 代表店名看得出是{subtype}；"
+                     f"false 的店不可以說它有{subtype}）")
+        keys = ["name", "category", "min_price", "max_price", "subtype_match",
                 "facts", "summary", "highlights", "reviews"]
         data = [{k: r.get(k) for k in keys if r.get(k) not in (None, "", [])} for r in restaurants]
         try:
@@ -541,10 +654,10 @@ class Pipe:
     # 主流程
     # ------------------------------------------------------------------
     @staticmethod
-    def describe_conditions(district, category, party_size, budget, source) -> str:
+    def describe_conditions(district, category, party_size, budget, source, subtype=None) -> str:
         parts = [
             district or "不限地區",
-            category or "不限類別",
+            (f"{category}・{subtype}" if subtype else category) if category else "不限類別",
             f"{party_size} 人" if party_size else "人數不限",
             f"每人 {budget} 元內" if budget else "預算不限",
         ]
@@ -579,7 +692,7 @@ class Pipe:
         user_text = user_text if isinstance(user_text, str) else str(user_text)
 
         # 1. 解析用戶條件
-        conditions, source, total = self.get_conditions(messages)
+        conditions, source, total, subtype = self.get_conditions(messages)
         district, category, party_size, budget = conditions
 
         # 問「有什麼類型可以選」→ 列出料理類型
@@ -589,10 +702,10 @@ class Pipe:
         # 資訊不足 → 繼續反問
         missing = self.should_ask(messages, conditions, total)
         if missing:
-            return self.ask_question(messages, conditions, missing, total)
+            return self.ask_question(messages, conditions, missing, total, subtype)
 
         # 「推薦別的」→ 排除同樣條件下已經推薦過的店
-        condition_line = self.describe_conditions(district, category, party_size, budget, source)
+        condition_line = self.describe_conditions(district, category, party_size, budget, source, subtype)
         exclude = self.shown_restaurants(messages, condition_line) if self.wants_more(user_text) else []
 
         # 2. 呼叫推薦 API
@@ -603,6 +716,9 @@ class Pipe:
             "budget": budget,
             "exclude": exclude,
         }
+        if subtype:
+            _, _, keywords, cross = SUBTYPES[subtype]
+            payload.update({"subtype": subtype, "subtype_keywords": keywords, "subtype_cross": cross})
         try:
             response = requests.post(self.valves.API_URL, json=payload, timeout=10)
             if response.status_code != 200:
@@ -628,7 +744,7 @@ class Pipe:
 
         # 3. 組合回答：條件 → 開場 → 每家餐廳（含推薦理由）
         texts, _ = self.current_round(messages)
-        intro, reasons = self.write_reasons(texts, conditions, restaurants)
+        intro, reasons = self.write_reasons(texts, conditions, restaurants, subtype)
 
         sections = []
         if self.valves.SHOW_CONDITIONS:
@@ -646,10 +762,30 @@ class Pipe:
             else:
                 sections.append(f"⚠️ 符合每人 {budget} 元預算的店只有 {matched} 家，"
                                 f"後面補上比預算稍微高一點（放寬到每人約 {relaxed} 元）的選擇。")
+        # 子類型：誠實說明哪些店看得出是這種、哪些只是一般同類別的店
+        matched_subtype = data.get("matched_subtype")
+        general = self.shop_label(category)  # 「一般的火鍋店」「一般的美式餐廳」
+        if subtype and matched_subtype is not None:
+            where = district or "台北"
+            shown_sub = sum(1 for r in restaurants if r.get("subtype_match"))
+            if shown_sub == 0 and exclude and matched_subtype == 0:
+                sections.append(f"⚠️ 店名看得出是「{subtype}」的店都推薦過了，"
+                                f"以下是一般的{general}，不一定有{subtype}。")
+            elif shown_sub == 0:
+                sections.append(f"⚠️ 資料庫裡找不到{where}店名看得出是「{subtype}」的店，"
+                                f"以下先推薦一般的{general}，不一定有{subtype}。")
+            elif shown_sub < len(restaurants):
+                sections.append(f"🏷️ 店名看得出是「{subtype}」的有 {shown_sub} 家，排在最前面；"
+                                f"後面是一般的{general}，不一定有{subtype}。")
         if intro:
             sections.append(f"💬 {intro}")
         blocks = []
         for i, (r, reason) in enumerate(zip(restaurants, reasons), 1):
+            prev = restaurants[i - 2] if i > 1 else None
+            # 子類型的店之後，接著是一般同類別的店 → 加分隔標題
+            if (subtype and prev and prev.get("subtype_match") and not r.get("subtype_match")
+                    and r.get("budget_fit") != "over"):
+                blocks.append(f"🍽️ **以下是一般的{general}（店名看不出是不是{subtype}）**")
             # 前面有符合預算的店時，才需要分隔標題（第一家就超過預算時，開頭的 ⚠️ 已經說明）
             if r.get("budget_fit") == "over" and i > 1 and restaurants[i - 2].get("budget_fit") != "over":
                 blocks.append(f"💸 **以下是比預算稍微高一點的選擇（放寬到每人約 {relaxed or '更高'} 元）**")
@@ -658,6 +794,13 @@ class Pipe:
         if tips:
             sections.append(tips)
         return "\n\n".join(sections)
+
+    @staticmethod
+    def shop_label(category: Optional[str]) -> str:
+        """「火鍋」→「火鍋店」，「美式餐廳」「酒吧」本身就是店，不用再加「店」。"""
+        if not category:
+            return "餐廳"
+        return category if category.endswith(("餐廳", "店", "吧")) else category + "店"
 
     @staticmethod
     def describe_alternatives(conditions, found: int, alternatives: list) -> str:
