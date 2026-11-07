@@ -94,8 +94,10 @@ def load_data():
     return df
 
 
-def search_restaurants(district=None, category=None, party_size=None, budget=None, top_n=5):
-    """篩選並排序餐廳。回傳 (DataFrame, None)；失敗或沒結果時回傳 (None, 錯誤訊息)。"""
+def search_restaurants(district=None, category=None, party_size=None, budget=None, top_n=5,
+                       exclude=None):
+    """篩選並排序餐廳。回傳 (DataFrame, None)；失敗或沒結果時回傳 (None, 錯誤訊息)。
+    exclude：要排除的餐廳名稱（使用者說「推薦別的」時，排除已經推薦過的店）。"""
     if not os.path.exists(DF_PATH):
         return None, f"❌ 找不到資料庫檔案：{DF_PATH}，請確認是否已執行採集腳本。"
 
@@ -103,6 +105,8 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
         all_df = load_data()
     except Exception as e:
         return None, f"❌ 資料庫讀取失敗: {e}"
+    if exclude:
+        all_df = all_df[~all_df["name"].isin(exclude)]
 
     df = apply_filters(all_df, district, category, party_size, budget)
     if budget:
@@ -172,12 +176,22 @@ def apply_filters(df, district=None, category=None, party_size=None, budget=None
     return df.copy()
 
 
-def relaxations_for(district=None, category=None, party_size=None, budget=None):
+def relaxations_for(district=None, category=None, party_size=None, budget=None, exclude=None):
     """給 API 在「完全沒有結果」時使用。"""
     try:
-        return suggest_relaxations(load_data(), district, category, party_size, budget)
+        df = load_data()
+        if exclude:
+            df = df[~df["name"].isin(exclude)]
+        return suggest_relaxations(df, district, category, party_size, budget)
     except Exception:
         return []
+
+
+def category_counts(district=None, party_size=None, budget=None):
+    """各料理類型有幾家店（使用者問「有什麼類型可以選」時用）。"""
+    df = apply_filters(load_data(), district, None, party_size, budget)
+    counts = df["category"].value_counts()
+    return [{"category": c, "count": int(n)} for c, n in counts.items()]
 
 
 def suggest_relaxations(df, district, category, party_size, budget, shown=0):

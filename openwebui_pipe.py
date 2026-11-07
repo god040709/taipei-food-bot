@@ -85,7 +85,8 @@ JSON 格式：
      蛋糕/下午茶→甜點、喝酒/調酒→酒吧、中菜/合菜→中式餐廳、漢堡/牛排→美式餐廳。
 3. party_size 是用餐人數（整數）。「我們兩個」=2、「一個人」=1、「三個人」=3。沒提到就 null。
 4. budget 是「每人」預算上限（整數，台幣）。「一千」=1000、「1k」=1000、「500以內」=500。
-   如果使用者給的是總預算且有人數，換算成每人（總預算 ÷ 人數，取整數）。沒提到就 null。
+   如果使用者給的是總預算（「總預算」「總共」「一共」「全部加起來」）且有人數，換算成每人（總預算 ÷ 人數，取整數）；
+   總預算但還不知道人數時填 null。沒提到就 null。
 5. 多輪對話：沿用先前的條件，只更新使用者這次改動的部分。
    - 「再便宜一點」：把先前的 budget 乘以 0.7 取整數；先前沒有 budget 就設為 300。
    - 「換成○○」「改○○」：只替換對應欄位。
@@ -130,6 +131,17 @@ QUESTIONS = {
     "budget": "每人預算上限大概多少？（例如：300、500、1000）",
 }
 LABELS = {"district": "地區", "category": "類型", "party_size": "人數", "budget": "預算"}
+
+# 總預算的說法：「總預算1500」「總共1500」「全部加起來 2000」→ 會除以人數換算成每人預算
+TOTAL_RE = r"(?:總預算|預算總共|預算一共|預算合計|全部加起來|加起來|總共|總計|一共|合計)"
+BUDGET_FILLER = r"\s*(?:大概|大約|約|差不多|抓|在|是|最多|頂多|上限|不超過|：|:)*\s*"
+# 「推薦別的」：沿用上一次的條件，排除已經推薦過的店
+MORE_WORDS = ["別的", "別家", "別間", "換一批", "換一些", "換幾間", "換幾家", "其他選擇", "其他的",
+              "其他間", "其他家", "還有嗎", "還有沒有", "還有其他", "再推薦", "再給我", "下一批",
+              "更多選擇", "不要這些", "不要這幾"]
+# 「有什麼類型可以選」：列出料理類型
+CATEGORY_QUESTION_RE = (r"(?:什麼|甚麼|哪些|哪幾種|哪種|啥|有什麼|有甚麼).{0,4}(?:類型|種類|類別|料理|選擇|可以吃|能吃|好吃的)"
+                        r"|(?:類型|種類|類別|料理).{0,3}(?:有哪些|有什麼|有甚麼|可以選)")
 
 
 class Pipe:
@@ -338,8 +350,17 @@ class Pipe:
             merged = [new if new is not None else old for old, new in zip(merged, parsed)]
         return tuple(merged)
 
+    @staticmethod
+    def total_budget(texts: list) -> Optional[int]:
+        """這次需求裡提到的「總預算」（不是每人），沒有就回傳 None。"""
+        for text in reversed(texts):
+            m = re.search(TOTAL_RE + BUDGET_FILLER + NUM, text)
+            if m:
+                return to_number(m.group(1))
+        return None
+
     def get_conditions(self, messages: list):
-        """回傳 (條件 tuple, 解析方式)。"""
+        """回傳 (條件 tuple, 解析方式, 總預算)。總預算會除以人數，換算成每人預算。"""
         conditions, source = None, "規則"
         if self.valves.USE_LLM_PARSER and self._llm_enabled():
             try:
@@ -352,7 +373,14 @@ class Pipe:
         texts, _ = self.current_round(messages)
         waived = self.waived_fields(texts)
         conditions = tuple(None if f in waived else v for f, v in zip(FIELDS, conditions))
-        return conditions, source
+
+        # 總預算：有人數就換算成每人；還不知道人數就先不填，等問完人數再算
+        total = self.total_budget(texts)
+        if total:
+            district, category, party_size, _ = conditions
+            budget = total // party_size if party_size else None
+            conditions = (district, category, party_size, budget)
+        return conditions, source, total
 
     # ------------------------------------------------------------------
     # 資訊不足時持續反問
@@ -375,7 +403,7 @@ class Pipe:
                 text = text.replace(w, "")  # 先拿掉「地區都可以」這類只針對單一條件的說法
         return any(w in text for w in SKIP_WORDS)
 
-    def should_ask(self, messages: list, conditions) -> list:
+    def should_ask(self, messages: list, conditions, total=None) -> list:
         """回傳還要問的欄位；空 list 代表資訊足夠，可以推薦。"""
         if not self.valves.ASK_FOLLOWUP:
             return []
@@ -385,14 +413,18 @@ class Pipe:
         if asks >= self.valves.MAX_ASK:
             return []  # 已經問很多次了，用目前的條件推薦
         waived = self.waived_fields(texts)
+        if total:
+            waived.add("budget")  # 已經有總預算，問到人數就能換算
         return [f for f, v in zip(FIELDS, conditions) if v is None and f not in waived]
 
-    def ask_question(self, messages: list, conditions, missing: list) -> str:
+    def ask_question(self, messages: list, conditions, missing: list, total=None) -> str:
         texts, asks = self.current_round(messages)
         waived = self.waived_fields(texts)
         known = []
         for field, value in zip(FIELDS, conditions):
-            if value is not None:
+            if field == "budget" and total:
+                known.append(f"總預算 {total} 元")
+            elif value is not None:
                 known.append({"party_size": f"{value} 人", "budget": f"每人 {value} 元內"}.get(field, value))
             elif field in waived:
                 known.append(f"{LABELS[field]}不限")
@@ -411,6 +443,66 @@ class Pipe:
         lines.append("直接回覆就可以，例如「信義區 3個人 每人800」；"
                      "某一項不在意可以說「地區都可以」，全部不在意就回「都可以」。")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # 使用者問「有什麼類型可以選」→ 列出料理類型
+    # ------------------------------------------------------------------
+    @staticmethod
+    def is_category_question(text: str) -> bool:
+        if any(c in text for c in CATEGORIES):
+            return False  # 已經說了想吃的類型，例如「有什麼火鍋推薦」
+        if any(w in text for words in FIELD_SKIP_WORDS.values() for w in words):
+            return False  # 「什麼都可以吃」是「不限」，不是在問
+        return re.search(CATEGORY_QUESTION_RE, text) is not None
+
+    def list_categories(self, conditions) -> str:
+        district, _, party_size, budget = conditions
+        counts = {}
+        try:
+            url = self.valves.API_URL.rsplit("/", 1)[0] + "/categories"
+            r = requests.post(url, json={"district": district, "party_size": party_size,
+                                         "budget": budget}, timeout=10)
+            counts = {c["category"]: c["count"] for c in r.json().get("categories", [])}
+        except Exception:
+            pass  # API 舊版或連不到：只列類型，不列家數
+
+        where = district or "全台北"
+        if budget:
+            where += f"、每人 {budget} 元內"
+        order = sorted(CATEGORIES, key=lambda c: -counts.get(c, 0)) if counts else CATEGORIES
+        lines = [f"{ASK_MARK}這些料理類型都可以選（{where}）：", ""]
+        if counts:
+            lines += ["| 類型 | 店家數 | 也可以這樣說 |", "|---|---|---|"]
+        else:
+            lines += ["| 類型 | 也可以這樣說 |", "|---|---|"]
+        for c in order:
+            if counts and not counts.get(c):
+                continue  # 這個條件下沒有店的類型就不列
+            examples = "、".join(CATEGORY_SYNONYMS.get(c, [])[:3]) or "—"
+            lines.append(f"| {c} | {counts[c]} 家 | {examples} |" if counts else f"| {c} | {examples} |")
+        lines += ["", "想吃哪一種？直接回覆類型就可以，例如「燒肉」；"
+                      "還沒決定的話，回「類型都可以」我就從各種料理裡挑。"]
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # 「推薦別的」→ 排除已經推薦過的店
+    # ------------------------------------------------------------------
+    @staticmethod
+    def wants_more(text: str) -> bool:
+        return any(w in text for w in MORE_WORDS)
+
+    @staticmethod
+    def shown_restaurants(messages: list, condition_line: str) -> list:
+        """同一組搜尋條件下，之前已經推薦過的店名。"""
+        names = []
+        for m in messages[:-1]:
+            content = m.get("content", "")
+            if m.get("role") != "assistant" or not isinstance(content, str):
+                continue
+            if condition_line.split("（")[0] not in content:
+                continue
+            names += re.findall(r"^\*\*\d+\. (.+?)\*\*$", content, flags=re.MULTILINE)
+        return names
 
     # ------------------------------------------------------------------
     # 推薦理由（每家一段，寫餐廳特色）
@@ -483,14 +575,25 @@ class Pipe:
         if not messages:
             return "無有效的對話訊息。"
 
+        user_text = messages[-1].get("content", "")
+        user_text = user_text if isinstance(user_text, str) else str(user_text)
+
         # 1. 解析用戶條件
-        conditions, source = self.get_conditions(messages)
+        conditions, source, total = self.get_conditions(messages)
         district, category, party_size, budget = conditions
 
+        # 問「有什麼類型可以選」→ 列出料理類型
+        if self.is_category_question(user_text):
+            return self.list_categories(conditions)
+
         # 資訊不足 → 繼續反問
-        missing = self.should_ask(messages, conditions)
+        missing = self.should_ask(messages, conditions, total)
         if missing:
-            return self.ask_question(messages, conditions, missing)
+            return self.ask_question(messages, conditions, missing, total)
+
+        # 「推薦別的」→ 排除同樣條件下已經推薦過的店
+        condition_line = self.describe_conditions(district, category, party_size, budget, source)
+        exclude = self.shown_restaurants(messages, condition_line) if self.wants_more(user_text) else []
 
         # 2. 呼叫推薦 API
         payload = {
@@ -498,6 +601,7 @@ class Pipe:
             "category": category,
             "party_size": party_size,
             "budget": budget,
+            "exclude": exclude,
         }
         try:
             response = requests.post(self.valves.API_URL, json=payload, timeout=10)
@@ -513,8 +617,11 @@ class Pipe:
             # 沒有結果，或 api.py 還是舊版：直接顯示 API 的文字
             sections = []
             if self.valves.SHOW_CONDITIONS:
-                sections.append(self.describe_conditions(district, category, party_size, budget, source))
-            sections.append(data.get("result", "沒有取得有效的推薦結果。"))
+                sections.append(condition_line)
+            if exclude:
+                sections.append(f"🔄 這個條件下的店都推薦過了（已推薦 {len(exclude)} 家）。")
+            else:
+                sections.append(data.get("result", "沒有取得有效的推薦結果。"))
             if tips:
                 sections.append(tips)
             return "\n\n".join(sections)
@@ -525,7 +632,11 @@ class Pipe:
 
         sections = []
         if self.valves.SHOW_CONDITIONS:
-            sections.append(self.describe_conditions(district, category, party_size, budget, source))
+            sections.append(condition_line)
+        if total and party_size:
+            sections.append(f"🧮 總預算 {total} 元 ÷ {party_size} 人 ≈ 每人 {budget} 元")
+        if exclude:
+            sections.append(f"🔄 換一批：已排除先前推薦過的 {len(exclude)} 家")
         matched = data.get("matched", len(restaurants))
         relaxed = data.get("relaxed_budget")
         if budget and relaxed:
