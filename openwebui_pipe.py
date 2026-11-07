@@ -475,8 +475,6 @@ class Pipe:
         ]
         if reason and self.valves.SHOW_REASONS:
             lines.append(f"✨ {reason}")
-        if r.get("rank_note"):
-            lines.append(f"↘️ 排在後面的原因：{r['rank_note']}")
         lines.append(f"🏠 {r['address']}｜🗺️ [在 Google Maps 開啟]({r['maps_url']})")
         return "\n".join(lines)
 

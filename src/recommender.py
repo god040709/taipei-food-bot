@@ -145,7 +145,6 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     has_within = bool((results["budget_fit"] == "within").any())
     results["maps_url"] = results.apply(maps_link, axis=1)
     results["facts"] = results.apply(lambda r: describe_facts(r, budget, has_within), axis=1)
-    results["rank_note"] = results.apply(lambda r: rank_note(r, budget, has_within), axis=1)
     results.attrs["matched"] = matched
     results.attrs["matched_within"] = int((df["budget_fit"] == "within").sum()) if budget else matched
     results.attrs["relaxed_budget"] = relaxed_budget if (results["budget_fit"] == "over").any() else None
@@ -237,18 +236,6 @@ def describe_facts(row, budget=None, has_within=True):
     return facts
 
 
-def rank_note(row, budget=None, has_within=True):
-    """排在比較後面的原因（沒有就回傳空字串）。"""
-    if not budget:
-        return ""
-    # 「比預算稍微高一點」的店已經有分隔標題說明，不用每家再寫
-    if row["budget_fit"] == "partial" and has_within:
-        # 前面沒有完全符合預算的店時，它本來就排在最前面，不用寫「排在後面」
-        return (f"多數人花費 {price_range(row)}，每人 {budget} 元可能不太夠，"
-                "所以排在花費都在預算內的店後面")
-    return ""
-
-
 def price_range(row):
     """Google 的「$1-200」代表 200 元以下，顯示成比較自然的文字。"""
     low, high = int(row["min_price"]), int(row["max_price"])
@@ -279,8 +266,6 @@ def format_card(i, row, reason=""):
     ]
     if reason:
         lines.append(f"✨ {reason}")
-    if row.get("rank_note"):
-        lines.append(f"↘️ 排在後面的原因：{row['rank_note']}")
     lines.append(f"🏠 {row['address']}｜🗺️ [在 Google Maps 開啟]({row['maps_url']})")
     return "\n".join(lines)
 
@@ -296,7 +281,7 @@ def to_records(results):
     """給 Pipe 顯示與 LLM 寫推薦理由用的資料。"""
     cols = ["name", "district", "category", "rating", "user_ratings_total",
             "min_price", "max_price", "score", "address", "maps_url", "budget_fit",
-            "over_by", "rank_note", "facts", "summary", "highlights", "reviews"]
+            "over_by", "facts", "summary", "highlights", "reviews"]
     cols = [c for c in cols if c in results.columns]
     records = [{k: (v.item() if hasattr(v, "item") else v) for k, v in r.items()}
                for r in results[cols].to_dict(orient="records")]
