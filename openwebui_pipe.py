@@ -270,7 +270,10 @@ class Pipe:
         return self.valves.LLM_BASE_URL.rstrip("/")
 
     def _headers(self) -> dict:
-        return {"Authorization": f"Bearer {self.valves.LLM_API_KEY}"}
+        # 貼上金鑰時常會多帶空白、換行或「Bearer 」，先清掉
+        key = self.valves.LLM_API_KEY.strip()
+        key = re.sub(r"^Bearer\s+", "", key, flags=re.IGNORECASE)
+        return {"Authorization": f"Bearer {key}"}
 
     def _model(self) -> str:
         if self.valves.LLM_MODEL:
@@ -664,7 +667,7 @@ class Pipe:
             if condition_line.split("（")[0] not in content:
                 continue
             names += re.findall(r"^\*\*\d+\. (.+?)\*\*$", content, flags=re.MULTILINE)
-        return names
+        return list(dict.fromkeys(names))  # 同一家可能出現在好幾次回覆裡，只算一次
 
     # ------------------------------------------------------------------
     # 「我不喜歡第 2 間」「輕鬆煮吃過了」→ 之後都不再推薦
@@ -861,9 +864,18 @@ class Pipe:
         condition_line = self.describe_conditions(district, category, party_size, budget, source, subtype,
                                                   info["llm_note"])
         more = self.wants_more(user_text) or info["intent"] == "more"
-        shown = self.shown_restaurants(messages, condition_line) if more else []
         rejected = list(dict.fromkeys(self.rejected_history(messages) + rejects))
-        exclude = list(dict.fromkeys(rejected + shown))
+        history = self.shown_restaurants(messages, condition_line)
+        if more:
+            # 換一批：同條件下推薦過的都排除
+            skipped = history
+        elif rejects:
+            # 只換掉不喜歡的那幾間：保留目前這批，更早幾批的照樣不要再出現
+            skipped = [n for n in history if n not in last_names]
+        else:
+            skipped = []
+        shown = [n for n in skipped if n not in rejected]  # 不喜歡的另外用 🚫 列，不重複計算
+        exclude = list(dict.fromkeys(rejected + skipped))
 
         # 2. 呼叫推薦 API
         payload = {
@@ -893,7 +905,7 @@ class Pipe:
                 sections.append(condition_line)
             if rejects:
                 sections.append(REJECTED_MARK + "".join(f"「{n}」" for n in rejects))
-            if shown:
+            if more and shown:
                 sections.append(f"🔄 這個條件下的店都推薦過了（已推薦 {len(shown)} 家）。")
             else:
                 sections.append(data.get("result", "沒有取得有效的推薦結果。"))
@@ -909,7 +921,7 @@ class Pipe:
             sections.append(f"🧮 總預算 {total} 元 ÷ {party_size} 人 ≈ 每人 {budget} 元")
         if rejects:
             sections.append(REJECTED_MARK + "".join(f"「{n}」" for n in rejects))
-        if shown:
+        if more and shown:
             sections.append(f"🔄 換一批：已排除先前推薦過的 {len(shown)} 家")
         matched = data.get("matched", len(restaurants))
         relaxed = data.get("relaxed_budget")
