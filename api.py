@@ -9,7 +9,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
-from recommender import search_restaurants, format_results, to_records  # noqa: E402
+from src.recommender import search_restaurants, format_results, to_records  # noqa: E402
 
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "5000"))
@@ -25,7 +25,9 @@ def handle_recommend(data: dict) -> dict:
     if error:
         return {"result": error, "restaurants": []}
     # result：顯示用文字；restaurants：結構化資料，給 LLM 寫推薦理由
-    return {"result": format_results(results), "restaurants": to_records(results)}
+    # matched：符合條件的餐廳總數（推薦根據用）
+    return {"result": format_results(results), "restaurants": to_records(results),
+            "matched": results.attrs.get("matched", len(results))}
 
 
 try:

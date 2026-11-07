@@ -17,8 +17,8 @@ W_BUDGET = 0.15     # 預算吻合度
 BAYES_M = 100
 
 
-def compute_scores(df, budget=None):
-    """計算每家餐廳的推薦指數 (0~100)。"""
+def score_components(df, budget=None):
+    """回傳三項分數（各自已乘上權重，加總 = 推薦指數 0~100）。"""
     reviews = df["user_ratings_total"].fillna(0)
     rating = df["rating"].fillna(df["rating"].mean())
 
@@ -39,8 +39,17 @@ def compute_scores(df, budget=None):
     else:
         budget_score = pd.Series(1.0, index=df.index)
 
-    score = W_RATING * rating_score + W_POPULARITY * popularity_score + W_BUDGET * budget_score
-    return (score * 100).round(1)
+    return pd.DataFrame({
+        "s_rating": (W_RATING * rating_score * 100).round(1),
+        "s_popularity": (W_POPULARITY * popularity_score * 100).round(1),
+        "s_budget": (W_BUDGET * budget_score * 100).round(1),
+    }, index=df.index)
+
+
+def compute_scores(df, budget=None):
+    """計算每家餐廳的推薦指數 (0~100)。"""
+    parts = score_components(df, budget)
+    return parts.sum(axis=1).round(1)
 
 
 def maps_link(row):
@@ -63,11 +72,11 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
 
     # 1. 行政區篩選
     if district and district != "全區":
-        df = df[df['district'].str.contains(district, na=False)]
+        df = df[df['district'].str.contains(district, regex=False, na=False)]
 
     # 2. 料理類別篩選
     if category and category != "不限":
-        df = df[df['category'].str.contains(category, na=False)]
+        df = df[df['category'].str.contains(category, regex=False, na=False)]
 
     # 3. 人數篩選
     if party_size:
@@ -82,10 +91,13 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
 
     # 5. 依加權推薦指數排序
     df = df.copy()
-    df["score"] = compute_scores(df, budget)
+    parts = score_components(df, budget)
+    df = df.join(parts)
+    df["score"] = parts.sum(axis=1).round(1)
     df = df.sort_values(by="score", ascending=False)
     results = df.head(top_n).copy()
     results["maps_url"] = results.apply(maps_link, axis=1)
+    results.attrs["matched"] = len(df)  # 符合條件的餐廳總數
     return results, None
 
 
@@ -103,7 +115,8 @@ def format_results(results):
     for _, row in results.iterrows():
         output.append(
             f"📍 **{row['name']}** ({row['district']} - {row['category']})\n"
-            f"🏆 推薦指數: {row['score']} / 100\n"
+            f"🏆 推薦指數: {row['score']} / 100"
+            f"（評分 {row['s_rating']} + 人氣 {row['s_popularity']} + 預算 {row['s_budget']}）\n"
             f"⭐ 評分: {row['rating']} ({int(row['user_ratings_total'])} 則評論)\n"
             f"💰 約略預算: {price_text(row)}\n"
             f"🏠 地址: {row['address']}\n"
@@ -115,7 +128,7 @@ def format_results(results):
 def to_records(results):
     """給 LLM 寫推薦理由用的精簡資料。"""
     cols = ["name", "district", "category", "rating", "user_ratings_total",
-            "min_price", "max_price", "score"]
+            "min_price", "max_price", "score", "s_rating", "s_popularity", "s_budget"]
     return [{k: (v.item() if hasattr(v, "item") else v) for k, v in r.items()}
             for r in results[cols].to_dict(orient="records")]
 
