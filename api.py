@@ -25,9 +25,10 @@ def handle_recommend(data: dict) -> dict:
     if error:
         return {"result": error, "restaurants": []}
     # result：顯示用文字；restaurants：結構化資料，給 LLM 寫推薦理由
-    # matched：符合條件的餐廳總數（推薦根據用）
+    # matched：符合條件的餐廳總數；matched_within：價格完全在預算內的家數
     return {"result": format_results(results), "restaurants": to_records(results),
-            "matched": results.attrs.get("matched", len(results))}
+            "matched": results.attrs.get("matched", len(results)),
+            "matched_within": results.attrs.get("matched_within", len(results))}
 
 
 try:
