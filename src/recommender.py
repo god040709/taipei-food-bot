@@ -18,6 +18,9 @@ W_BUDGET = 0.15     # 預算吻合度
 # 貝氏平均的門檻：評論數少於這個數字時，評分會被拉向全體平均
 BAYES_M = 100
 
+# 符合預算的店不夠時，預算依序放寬到這些倍數（找到足夠的店就停）
+RELAX_STEPS = (1.2, 1.5, 2.0)
+
 # 從店名看得出來的特色
 NAME_KEYWORDS = {
     "吃到飽": "吃到飽", "和牛": "主打和牛", "寵物友善": "寵物友善", "石頭": "石頭鍋",
@@ -106,27 +109,49 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
         df["budget_fit"] = (df["max_price"] <= budget).map({True: "within", False: "partial"})
     else:
         df["budget_fit"] = ""
+    matched = len(df)  # 符合原本條件的家數
 
-    # 結果不到 top_n 家：算出放寬哪個條件可以多找到幾家
-    alternatives = suggest_relaxations(all_df, district, category, party_size, budget) \
-        if len(df) < top_n else []
+    # 符合的不到 top_n 家：預算一點一點往上加，補上「稍微超過預算」的店
+    relaxed_budget = None
+    if budget and matched < top_n:
+        for factor in RELAX_STEPS:
+            cap = int(math.ceil(budget * factor / 50) * 50)
+            extra = apply_filters(all_df, district, category, party_size, cap)
+            extra = extra[~extra["place_id"].isin(df["place_id"])]
+            relaxed_budget = cap
+            if matched + len(extra) >= top_n or factor == RELAX_STEPS[-1]:
+                break
+        if len(extra):
+            extra = extra.copy()
+            extra["budget_fit"] = "over"
+            df = pd.concat([df, extra])
+        else:
+            relaxed_budget = None
 
     if df.empty:
         return None, "⚠️ 沒有找到符合條件的餐廳，建議放寬預算或地區條件！"
 
-    # 5. 依加權推薦指數排序（完全在預算內的店一定排在前面）
+    # 依加權推薦指數排序：完全在預算內 → 部分超出 → 稍微超過預算（越接近預算越前面）
     parts = score_components(df, budget)
     df = df.join(parts)
     df["score"] = parts.sum(axis=1).round(1)
-    df["_fit_order"] = (df["budget_fit"] == "partial").astype(int)
-    df = df.sort_values(by=["_fit_order", "score"], ascending=[True, False])
+    df["_fit_order"] = df["budget_fit"].map({"within": 0, "partial": 1, "over": 2}).fillna(0)
+    df["_over_order"] = df["min_price"].where(df["budget_fit"] == "over", 0)
+    df["over_by"] = (df["min_price"] - budget).clip(lower=0).where(df["budget_fit"] == "over") \
+        if budget else None
+    df = df.sort_values(by=["_fit_order", "_over_order", "score"], ascending=[True, True, False])
 
     results = df.head(top_n).copy()
+    has_within = bool((results["budget_fit"] == "within").any())
     results["maps_url"] = results.apply(maps_link, axis=1)
-    results["facts"] = results.apply(lambda r: describe_facts(r, budget), axis=1)
-    results.attrs["matched"] = len(df)  # 符合條件的餐廳總數
-    results.attrs["matched_within"] = int((df["budget_fit"] == "within").sum()) if budget else len(df)
-    results.attrs["alternatives"] = alternatives
+    results["facts"] = results.apply(lambda r: describe_facts(r, budget, has_within), axis=1)
+    results["rank_note"] = results.apply(lambda r: rank_note(r, budget, has_within), axis=1)
+    results.attrs["matched"] = matched
+    results.attrs["matched_within"] = int((df["budget_fit"] == "within").sum()) if budget else matched
+    results.attrs["relaxed_budget"] = relaxed_budget if (results["budget_fit"] == "over").any() else None
+    # 補完還是不到 top_n 家：算出放寬哪個條件可以多找到幾家
+    results.attrs["alternatives"] = suggest_relaxations(all_df, district, category, party_size, budget) \
+        if len(results) < top_n else []
     return results, None
 
 
@@ -178,7 +203,7 @@ def suggest_relaxations(df, district, category, party_size, budget):
     return options
 
 
-def describe_facts(row, budget=None):
+def describe_facts(row, budget=None, has_within=True):
     """從資料推得出來的客觀事實，給 LLM 寫推薦理由（也是沒有 LLM 時的推薦理由）。"""
     facts = []
     name = str(row["name"])
@@ -204,12 +229,22 @@ def describe_facts(row, budget=None):
     elif row["group_mid_price"] and mid >= row["group_mid_price"] * 1.3:
         facts.append("屬於同區同類型中較高價位的選擇")
 
-    if budget:
-        if row["budget_fit"] == "within":
-            facts.append(f"價格完全在每人 {budget} 元預算內")
-        else:
-            facts.append(f"最低消費在預算內，但部分餐點超過每人 {budget} 元")
+    if budget and row["budget_fit"] == "within":
+        facts.append(f"價格完全在每人 {budget} 元預算內")
     return facts
+
+
+def rank_note(row, budget=None, has_within=True):
+    """排在比較後面的原因（沒有就回傳空字串）。"""
+    if not budget:
+        return ""
+    if row["budget_fit"] == "over":
+        return (f"最低消費 ${int(row['min_price'])} 起，比每人 {budget} 元的預算多約 "
+                f"{int(row['over_by'])} 元，所以排在符合預算的店後面")
+    if row["budget_fit"] == "partial" and has_within:
+        # 前面沒有完全符合預算的店時，它本來就排在最前面，不用寫「排在後面」
+        return f"最低消費在預算內，但部分餐點超過每人 {budget} 元，所以排在完全符合預算的店後面"
+    return ""
 
 
 def price_text(row):
@@ -230,6 +265,8 @@ def format_card(i, row, reason=""):
     price = price_text(row)
     if row.get("budget_fit") == "partial":
         price += "（⚠️ 部分餐點可能超出預算）"
+    elif row.get("budget_fit") == "over":
+        price += f"（⚠️ 超出預算約 {int(row['over_by'])} 元）"
     lines = [
         f"**{i}. {row['name']}**",
         f"📍 {row['district']}・{row['category']}｜⭐ {row['rating']}"
@@ -237,6 +274,8 @@ def format_card(i, row, reason=""):
     ]
     if reason:
         lines.append(f"✨ {reason}")
+    if row.get("rank_note"):
+        lines.append(f"↘️ 排在後面的原因：{row['rank_note']}")
     lines.append(f"🏠 {row['address']}｜🗺️ [在 Google Maps 開啟]({row['maps_url']})")
     return "\n".join(lines)
 
@@ -252,9 +291,15 @@ def to_records(results):
     """給 Pipe 顯示與 LLM 寫推薦理由用的資料。"""
     cols = ["name", "district", "category", "rating", "user_ratings_total",
             "min_price", "max_price", "score", "address", "maps_url", "budget_fit",
-            "facts", "summary", "highlights", "reviews"]
-    return [{k: (v.item() if hasattr(v, "item") else v) for k, v in r.items()}
-            for r in results[cols].to_dict(orient="records")]
+            "over_by", "rank_note", "facts", "summary", "highlights", "reviews"]
+    cols = [c for c in cols if c in results.columns]
+    records = [{k: (v.item() if hasattr(v, "item") else v) for k, v in r.items()}
+               for r in results[cols].to_dict(orient="records")]
+    for r in records:  # NaN 不能轉成 JSON
+        for k, v in r.items():
+            if isinstance(v, float) and math.isnan(v):
+                r[k] = None
+    return records
 
 
 def filter_restaurants(district=None, category=None, party_size=None, budget=None, top_n=5):

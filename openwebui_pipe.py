@@ -101,7 +101,7 @@ REASON_PROMPT = """你是台北餐廳推薦助理。根據使用者的需求和�
   highlights（服務特色）、reviews（顧客評論摘錄）。資料沒有的菜色、裝潢、營業時間不可以編造。
 - reviews 裡顧客常提到的招牌菜、湯頭、服務、氣氛，可以用「評論常提到…」的方式引用。
 - 不要寫推薦指數、分數或計算方式。不要每家都用一樣的句型開頭。
-- budget_fit 是 "partial" 的店，要提醒部分餐點可能超出預算。
+- 預算超出的部分（budget_fit 是 "partial" 或 "over"）系統會另外顯示原因，推薦理由裡不用再提。
 - 只輸出 JSON，不要其他文字，格式：
   {"intro": "一句話的開場，例如這批推薦的整體方向", "reasons": ["第 1 家的理由", "第 2 家的理由", ...]}
   reasons 的數量和順序要和餐廳資料完全一樣。
@@ -424,7 +424,7 @@ class Pipe:
         need = "；".join(texts[-4:])
         cond = (f"地區={district or '不限'}，類型={category or '不限'}，"
                 f"人數={party_size or '不限'}，每人預算上限={budget or '不限'}")
-        keys = ["name", "category", "min_price", "max_price", "budget_fit",
+        keys = ["name", "category", "min_price", "max_price",
                 "facts", "summary", "highlights", "reviews"]
         data = [{k: r.get(k) for k in keys if r.get(k) not in (None, "", [])} for r in restaurants]
         try:
@@ -463,6 +463,8 @@ class Pipe:
         text = f"${high} 以下 / 人" if low <= 1 else f"${low} - ${high} / 人"
         if r.get("budget_fit") == "partial":
             text += "（⚠️ 部分餐點可能超出預算）"
+        elif r.get("budget_fit") == "over" and r.get("over_by") is not None:
+            text += f"（⚠️ 超出預算約 {int(r['over_by'])} 元）"
         return text
 
     def format_card(self, i: int, r: dict, reason: str) -> str:
@@ -473,6 +475,8 @@ class Pipe:
         ]
         if reason and self.valves.SHOW_REASONS:
             lines.append(f"✨ {reason}")
+        if r.get("rank_note"):
+            lines.append(f"↘️ 排在後面的原因：{r['rank_note']}")
         lines.append(f"🏠 {r['address']}｜🗺️ [在 Google Maps 開啟]({r['maps_url']})")
         return "\n".join(lines)
 
@@ -524,18 +528,23 @@ class Pipe:
         sections = []
         if self.valves.SHOW_CONDITIONS:
             sections.append(self.describe_conditions(district, category, party_size, budget, source))
-        within = data.get("matched_within", len(restaurants))
-        if budget and within == 0:
-            sections.append(f"⚠️ 沒有價格完全在每人 {budget} 元內的店，"
-                            "以下是最低消費在預算內、但部分餐點可能超出預算的選擇。")
-        elif budget and within < len(restaurants):
-            sections.append(f"⚠️ 完全在每人 {budget} 元內的店只有 {within} 家，"
-                            "後面幾家的部分餐點可能超出預算。")
+        matched = data.get("matched", len(restaurants))
+        relaxed = data.get("relaxed_budget")
+        if budget and relaxed:
+            if matched == 0:
+                sections.append(f"⚠️ 沒有符合每人 {budget} 元預算的店，"
+                                f"以下把預算稍微放寬到每人約 {relaxed} 元來找。")
+            else:
+                sections.append(f"⚠️ 符合每人 {budget} 元預算的店只有 {matched} 家，"
+                                f"後面補上預算稍微超過（每人約 {relaxed} 元內）的選擇。")
         if intro:
             sections.append(f"💬 {intro}")
-        cards = [self.format_card(i, r, reason)
-                 for i, (r, reason) in enumerate(zip(restaurants, reasons), 1)]
-        sections.append("\n\n---\n\n".join(cards))
+        blocks = []
+        for i, (r, reason) in enumerate(zip(restaurants, reasons), 1):
+            if r.get("budget_fit") == "over" and (i == 1 or restaurants[i - 2].get("budget_fit") != "over"):
+                blocks.append(f"💸 **以下是預算稍微超過的選擇（每人約 {relaxed or '更高'} 元內）**")
+            blocks.append(self.format_card(i, r, reason))
+        sections.append("\n\n---\n\n".join(blocks))
         if tips:
             sections.append(tips)
         return "\n\n".join(sections)
@@ -547,7 +556,11 @@ class Pipe:
             return ""
         district = conditions[0]
         where = district or "目前條件下"
-        lines = ["---", f"💡 {where}符合的只有 {found} 家（資料庫裡的店家數有限）。想看更多選擇，可以直接回覆："]
+        if found:
+            head = f"💡 {where}符合的只有 {found} 家（資料庫裡的店家數有限）。想看更多選擇，可以直接回覆："
+        else:
+            head = f"💡 {where}沒有符合的店。可以試試直接回覆："
+        lines = ["---", head]
         for alt in alternatives:
             lines.append(f"- 「{alt['reply']}」→ {alt['text']}")
         return "\n".join(lines)

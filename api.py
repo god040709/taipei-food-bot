@@ -32,7 +32,9 @@ def handle_recommend(data: dict) -> dict:
     return {"result": format_results(results), "restaurants": to_records(results),
             "matched": results.attrs.get("matched", len(results)),
             "matched_within": results.attrs.get("matched_within", len(results)),
-            "alternatives": results.attrs.get("alternatives", [])}
+            "alternatives": results.attrs.get("alternatives", []),
+            # relaxed_budget：符合預算的店不夠時，放寬到的預算（後面補上的店標示為 over）
+            "relaxed_budget": results.attrs.get("relaxed_budget")}
 
 
 try:
