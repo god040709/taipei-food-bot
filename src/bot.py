@@ -8,11 +8,11 @@ from typing import Optional
 
 import service
 from lexicon import (  # 詞庫、提示詞、文字處理
-    ASK_MARK, BUDGET_FILLER, CATEGORIES, CATEGORY_QUESTION_RE, CATEGORY_SYNONYMS, CHAT_MARK,
-    CHAT_PROMPT, CN_INDEX, DISTRICTS, FIELDS, FIELD_SKIP_WORDS, LABELS, MORE_WORDS, MRT_STATIONS,
-    NEG_AFTER_RE, NEG_BEFORE_RE, NUM, PARSE_PROMPT, PERSON_PREFS, PREFS_MARK, PREF_OFF_WORDS,
-    QUESTIONS, REASON_PROMPT, REJECTED_MARK, REJECT_SOFT, REJECT_STRONG, SKIP_WORDS, STYLE_WORDS,
-    SUBTYPES, TOTAL_RE, find_near, fix_homophones, to_number,
+    ASK_HINT_WORDS, ASK_MARK, BUDGET_FILLER, CATEGORIES, CATEGORY_QUESTION_RE, CATEGORY_SYNONYMS,
+    CHAT_MARK, CHAT_PROMPT, CN_INDEX, DISTRICTS, FIELDS, FIELD_SKIP_WORDS, LABELS, MORE_WORDS,
+    MRT_STATIONS, NEG_AFTER_RE, NEG_BEFORE_RE, NUM, PARSE_PROMPT, PERSON_PREFS, PREFS_MARK,
+    PREF_OFF_WORDS, QUESTIONS, REASON_PROMPT, REJECTED_MARK, REJECT_SOFT, REJECT_STRONG, SAY_PROMPT,
+    SKIP_WORDS, STYLE_WORDS, SUBTYPES, TOTAL_RE, find_near, fix_homophones, to_number,
 )
 from llm import LLMError
 
@@ -660,12 +660,27 @@ class Bot:
             elif field in waived:
                 known.append(f"{LABELS[field]}不限")
 
+        extra = self.prefs_line(prefs)[len(PREFS_MARK):]
+        if self._llm_enabled():
+            asked = [{"district": "地區（台北 12 區都可以，也可以說捷運站附近）", "category": "想吃的料理類型",
+                      "party_size": "人數", "budget": "每人預算"}[f] for f in missing]
+            text = self.say(
+                "還缺一些資訊才能推薦餐廳。請自然地問使用者「還需要問」的每一項，全部都要問到（可以合在一兩句裡），"
+                "已經知道的不要再問。可以順便讓使用者知道，不在意的項目說不限就好。",
+                [f"使用者剛剛說：「{texts[-1]}」" if texts else "",
+                 f"目前已知：{'、'.join(known + ([extra] if extra else [])) or '還沒有'}",
+                 f"還需要問：{'；'.join(asked)}",
+                 f"這是第 {asks + 1} 次追問，不要再打招呼" if asks else ""])
+            if text:
+                # 確認每一項都有問到，LLM 漏掉的補一句
+                lacking = [QUESTIONS[f] for f in missing if not any(w in text for w in ASK_HINT_WORDS[f])]
+                return ASK_MARK + text + ("\n" + "\n".join(lacking) if lacking else "")
+
         if asks == 0:
             opening = "想幫你找到更適合的餐廳，可以再多告訴我一些嗎？"
         else:
             opening = "了解！還差一點點資訊，我就能幫你挑出最合適的餐廳："
         lines = [f"{ASK_MARK}{opening}"]
-        extra = self.prefs_line(prefs)[len(PREFS_MARK):]
         if extra:
             known.append(extra)
         if known:
@@ -803,10 +818,25 @@ class Bot:
                 result.append(name)
         return list(dict.fromkeys(result))  # 去重、保留順序
 
-    def ask_which(self, names: list) -> str:
-        lines = [f"{ASK_MARK}是哪一間呢？可以直接說「第 2 間」或店名，我就不會再推薦它："]
-        lines += [f"{i}. {n}" for i, n in enumerate(names, 1)]
-        return "\n".join(lines)
+    def ask_which(self, names: list, user_text: str = "") -> str:
+        """使用者說吃過／不喜歡，但沒說是哪一間 → 問是哪一間（店名清單由程式列出）。"""
+        lead = self.say("使用者說吃過或不喜歡推薦過的店，但沒說是哪一間。請自然地問是哪一間，"
+                        "告訴他可以說第幾間或店名，之後就不會再推薦。店名清單會另外列在下面。",
+                        [f"使用者剛剛說：「{user_text}」"]) \
+            or "是哪一間呢？可以直接說「第 2 間」或店名，我就不會再推薦它："
+        return "\n".join([ASK_MARK + lead] + [f"{i}. {n}" for i, n in enumerate(names, 1)])
+
+    def say(self, task: str, facts: list) -> Optional[str]:
+        """請 LLM 用自然的話說出 task（facts 是它能用的資訊）。沒有 LLM 或失敗時回傳 None。"""
+        if not self._llm_enabled():
+            return None
+        content = "要做的事：" + task + "\n資訊：\n" + "\n".join(f"- {f}" for f in facts if f)
+        try:
+            text = self._chat([{"role": "system", "content": SAY_PROMPT}, {"role": "user", "content": content}],
+                              max_tokens=200, temperature=0.7)
+        except Exception:
+            return None
+        return text.strip() or None
 
     def chat_reply(self, messages: list) -> Optional[str]:
         """不是要新推薦的訊息（道謝、閒聊、問細節）→ 用 LLM 自然回覆。"""
@@ -945,7 +975,8 @@ class Bot:
 
         # 「不喜歡第 2 間」「吃過了」→ 找出是哪幾間
         prev_msg = str(messages[-2].get("content", "")) if len(messages) >= 2 else ""
-        asked_which = prev_msg.startswith(f"{ASK_MARK}是哪一間呢")
+        # 上一則是「是哪一間呢？」（有列出剛剛推薦的店名清單）
+        asked_which = bool(prev_msg.startswith(ASK_MARK) and last_names and f"\n1. {last_names[0]}" in prev_msg)
         rejects, reject_said = self.find_rejects(user_text, last_names, force=asked_which)
         if not rejects and info["intent"] == "reject" and (
                 asked_which or self.match_names(user_text, last_names)
@@ -955,7 +986,7 @@ class Bot:
             if self.wants_more(user_text):
                 rejects = list(last_names)  # 「吃過了，換別的」→ 這批都不要
             else:
-                return self.ask_which(last_names)
+                return self.ask_which(last_names, user_text)
 
         # 不是要新推薦（問你會做什麼、道謝、閒聊、問細節）→ LLM 自然回覆。
         # 這句話有提到任何條件就當成找餐廳，避免把需求誤判成閒聊
@@ -969,9 +1000,12 @@ class Bot:
         if missing:
             return self.ask_question(messages, conditions, missing, total, subtype, prefs)
 
-        asked_none = re.match(rf"{ASK_MARK}資料庫裡沒有店名看得出是「(.+?)」", prev_msg)
-        if asked_none and subtype == asked_none.group(1):
-            subtype = None  # 使用者回「都可以」之類的 → 直接推薦一般的店
+        # 上一則問過「資料庫沒有這種店，要改成哪一種？」，這次沒有選別的子類型（例如回「都可以」）
+        # → 推薦一般的店，不再問一次
+        if subtype and prev_msg.startswith(ASK_MARK) \
+                and f"「一般{self.shop_label(SUBTYPES[subtype][0])}」" in prev_msg \
+                and not self.detect_subtype(fix_homophones(user_text)[0], None):
+            subtype = None
 
         # 「推薦別的」→ 排除同樣條件下已經推薦過的店
         condition_line = self.describe_conditions(district, category, party_size, budget, source, subtype,
@@ -1120,12 +1154,19 @@ class Bot:
         """整個資料庫都沒有這種子類型的店 → 先問使用者要改成什麼，不直接列一般的店。"""
         general = self.shop_label(category)
         place = where or "台北"
-        lines = [f"{ASK_MARK}資料庫裡沒有店名看得出是「{subtype}」的店（整個台北都找不到），"
-                 f"沒辦法確定哪家有{subtype}。要改成下面哪一種？", ""]
+        options = []
         if overview.get("general"):
-            lines.append(f"- 「一般{general}」→ {place}有 {overview['general']} 家符合")
+            options.append(f"- 「一般{general}」→ {place}有 {overview['general']} 家符合")
         for name, n in (overview.get("siblings") or [])[:4]:
-            lines.append(f"- 「{name}」→ {place}有 {n} 家")
+            options.append(f"- 「{name}」→ {place}有 {n} 家")
+        lead = self.say(f"使用者想吃{subtype}，但整個台北的資料裡都沒有店名看得出是{subtype}的店，沒辦法確定哪家有。"
+                        "請自然地說明，並請他從下面另外列出的選項挑一個，或直接說想換的類型。",
+                        [f"使用者想吃：{subtype}（屬於{category}）",
+                         f"整個台北（所有行政區）都沒有店名看得出是{subtype}的店，不是只有{place}沒有"])
+        if lead:
+            return "\n".join([ASK_MARK + lead, ""] + options)
+        lines = [f"{ASK_MARK}資料庫裡沒有店名看得出是「{subtype}」的店（整個台北都找不到），"
+                 f"沒辦法確定哪家有{subtype}。要改成下面哪一種？", ""] + options
         lines += ["", "直接回覆上面「」裡的說法就可以；想換別的類型也可以直接說。"]
         return "\n".join(lines)
 
