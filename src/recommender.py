@@ -1,5 +1,6 @@
 import os
 import math
+import re
 from urllib.parse import quote
 
 import pandas as pd
@@ -9,6 +10,16 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DF_PATH = os.path.join(BASE_DIR, "data", "taipei_all_restaurants.csv")
 # 餐廳特色（enrich_features.py 產生，沒有這個檔案也能運作）
 FEATURES_PATH = os.path.join(BASE_DIR, "data", "restaurant_features.csv")
+# 台北市捷運站座標（tools/build_lookups.py 產生）
+STATIONS_PATH = os.path.join(BASE_DIR, "data", "mrt_stations.csv")
+
+# 「捷運站附近」的範圍（公尺）：先找 800 公尺（走路約 10 分鐘），不夠再放寬
+NEAR_STEPS = (800, 1500)
+# 「跟某間差不多的」：以那間店為中心找同類型的店
+SIMILAR_STEPS = (1500, 3000)
+# 「隱藏版」：評分夠高、評論數至少這麼多（太少的評分不可靠），且少於同區同類型的中位數
+HIDDEN_MIN_RATING = 4.3
+HIDDEN_MIN_REVIEWS = 50
 
 # 加權評分的權重（加總為 1，可依需求調整）
 W_RATING = 0.6      # 評分可信度
@@ -91,17 +102,72 @@ def load_data():
     df["review_rank"] = group["user_ratings_total"].rank(ascending=False, method="min").astype(int)
     mid = (df["min_price"] + df["max_price"]) / 2
     df["group_mid_price"] = mid.groupby([df["district"], df["category"]]).transform("median")
+
+    # 連鎖店：資料裡沒有這個欄位，用「同一個品牌名出現在 2 家以上不同的店」來推測
+    df["brand"] = df["name"].map(brand_key)
+    counts = df[df["brand"] != ""].groupby("brand")["place_id"].nunique()
+    df["brand_count"] = df["brand"].map(counts).fillna(1).astype(int)
+    df["is_chain"] = (df["brand"] != "") & (df["brand_count"] >= 2)
+
+    # 隱藏版：評分高、但評論數比同區同類型的一半以上店家少（又不能少到評分不可靠）
+    df["group_median_reviews"] = group["user_ratings_total"].transform("median")
+    df["is_hidden"] = ((df["rating"] >= HIDDEN_MIN_RATING)
+                       & (df["user_ratings_total"] >= HIDDEN_MIN_REVIEWS)
+                       & (df["user_ratings_total"] < df["group_median_reviews"]))
     return df
 
 
+BRAND_SEP = r"[｜|（(\-—－/／:：,，。·・\[\]【】「」]"
+
+
+def brand_key(name) -> str:
+    """店名 → 品牌名（用來判斷連鎖）。例如「1+1鍋物—忠孝店」→「1+1鍋物」、
+    「好食多涮涮鍋 大安店」→「好食多涮涮鍋」。太短、太通用的（例如「麵屋」「The」）回傳空字串。"""
+    token = re.split(BRAND_SEP, str(name).strip())[0].strip().lower()
+    if re.match(r"[a-z0-9]", token):
+        # 英文店名：取前兩個字（「TGI Fridays 信義店」→「tgi fridays」）
+        m = re.match(r"[a-z0-9&'.+ ]+", token)
+        key = " ".join(m.group(0).split()[:2]) if m else ""
+        return key if len(key.replace(" ", "")) >= 5 else ""
+    token = token.split()[0] if token.split() else ""
+    # 去掉結尾的分店名：「鼎泰豐信義店」→「鼎泰豐」
+    stripped = re.sub(r"(?:台北|臺北)?[一-鿿]{1,4}(?:分店|總店|門市|店)$", "", token)
+    token = stripped if len(stripped) >= 3 else token
+    return token if len(token) >= 3 else ""
+
+
+def load_stations() -> dict:
+    """捷運站名 → (緯度, 經度)。沒有座標檔時回傳空 dict。"""
+    if not os.path.exists(STATIONS_PATH):
+        return {}
+    st = pd.read_csv(STATIONS_PATH)
+    return {r["name"]: (float(r["lat"]), float(r["lng"])) for _, r in st.iterrows()}
+
+
+def distance_m(df, lat, lng):
+    """每家店到某個點的直線距離（公尺）。"""
+    rad = math.pi / 180
+    dlat = (df["lat"] - lat) * rad
+    dlng = (df["lng"] - lng) * rad
+    a = (dlat / 2).map(math.sin) ** 2 + math.cos(lat * rad) * (df["lat"] * rad).map(math.cos) \
+        * (dlng / 2).map(math.sin) ** 2
+    return (2 * 6371000 * a.map(lambda x: math.asin(math.sqrt(min(1.0, x))))).round()
+
+
 def search_restaurants(district=None, category=None, party_size=None, budget=None, top_n=5,
-                       exclude=None, subtype=None, subtype_keywords=None, subtype_cross=False):
+                       exclude=None, subtype=None, subtype_keywords=None, subtype_cross=False, opts=None):
     """篩選並排序餐廳。回傳 (DataFrame, None)；失敗或沒結果時回傳 (None, 錯誤訊息)。
     exclude：要排除的餐廳名稱（使用者說「推薦別的」時，排除已經推薦過的店）。
     subtype / subtype_keywords：子類型（例如「壽喜燒」）與店名關鍵字。
         店名含關鍵字的店排在前面，其他同類別的店排在後面。
     subtype_cross：True 時，別的類別裡店名含關鍵字的店也算進來（例如被分在「燒肉」的壽喜燒店）。
-        關鍵字太廣的子類型（例如「麵」）設 False，只在原本類別裡比對。"""
+        關鍵字太廣的子類型（例如「麵」）設 False，只在原本類別裡比對。
+    opts：其他條件（都可以不給）
+        near：捷運站名，找附近的店（不限行政區）
+        similar_to：店名，找和這家同類型、附近、價位相近的店
+        categories：多個類別（「日式或韓式都可以」）
+        avoid_categories：不要的類別（「剛吃過拉麵」）
+        no_chain：不要連鎖店；hidden_gem：隱藏版；budget_min：每人預算下限"""
     if not os.path.exists(DF_PATH):
         return None, f"❌ 找不到資料庫檔案：{DF_PATH}，請確認是否已執行採集腳本。"
 
@@ -109,12 +175,53 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
         all_df = load_data()
     except Exception as e:
         return None, f"❌ 資料庫讀取失敗: {e}"
+    opts = dict(opts or {})
+    info = {}
+
+    # 「跟某間差不多的」：以那家店為中心，同類型、價位相近
+    center, steps = None, None
+    if opts.get("similar_to"):
+        ref = all_df[all_df["name"] == opts["similar_to"]]
+        if len(ref):
+            ref = ref.iloc[0]
+            center, steps = (float(ref["lat"]), float(ref["lng"])), SIMILAR_STEPS
+            category, district = ref["category"], None
+            opts["categories"] = None
+            if not budget:
+                budget = int(math.ceil(float(ref["max_price"]) / 50) * 50)
+            exclude = list(exclude or []) + [ref["name"]]
+            info["similar"] = {"name": ref["name"], "category": ref["category"], "budget": budget}
+    # 「捷運站附近」：以車站為中心，不限行政區
+    if center is None and opts.get("near"):
+        point = load_stations().get(opts["near"])
+        if point:
+            center, steps = point, NEAR_STEPS
+            district = None
+            info["near"] = opts["near"]
     if exclude:
         all_df = all_df[~all_df["name"].isin(exclude)]
+    if center:
+        all_df = all_df.copy()
+        all_df["distance"] = distance_m(all_df, *center)
 
     kw = subtype_keywords or []
     cross_kw = kw if subtype_cross else None  # 用來把別的類別的店也納入
-    df = apply_filters(all_df, district, category, party_size, budget, cross_kw)
+
+    # 附近的店不夠 top_n 家：範圍放寬一級
+    if center:
+        for radius in steps:
+            opts["radius"] = radius
+            if len(apply_filters(all_df, district, category, party_size, budget, cross_kw, opts)) >= top_n:
+                break
+        info["radius"] = opts["radius"]
+        info["radius_relaxed"] = opts["radius"] != steps[0]
+        info["radius_first"] = steps[0]
+
+    df = apply_filters(all_df, district, category, party_size, budget, cross_kw, opts)
+    # 排除連鎖店時，告訴使用者排掉了幾家
+    if opts.get("no_chain"):
+        info["chain_removed"] = len(apply_filters(all_df, district, category, party_size, budget, cross_kw,
+                                                  {**opts, "no_chain": False})) - len(df)
     if budget:
         df["budget_fit"] = (df["max_price"] <= budget).map({True: "within", False: "partial"})
     else:
@@ -126,7 +233,7 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     if budget and matched < top_n:
         for factor in RELAX_STEPS:
             cap = int(math.ceil(budget * factor / 50) * 50)
-            extra = apply_filters(all_df, district, category, party_size, cap, cross_kw)
+            extra = apply_filters(all_df, district, category, party_size, cap, cross_kw, opts)
             extra = extra[~extra["place_id"].isin(df["place_id"])]
             relaxed_budget = cap
             if matched + len(extra) >= top_n or factor == RELAX_STEPS[-1]:
@@ -142,7 +249,7 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     if budget and kw and not name_matches(df, kw).any():
         for factor in RELAX_STEPS:
             cap = int(math.ceil(budget * factor / 50) * 50)
-            extra = apply_filters(all_df, district, category, party_size, cap, cross_kw)
+            extra = apply_filters(all_df, district, category, party_size, cap, cross_kw, opts)
             extra = extra[name_matches(extra, kw) & ~extra["place_id"].isin(df["place_id"])]
             if len(extra):
                 extra = extra.copy()
@@ -158,6 +265,9 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     parts = score_components(df, budget)
     df = df.join(parts)
     df["score"] = parts.sum(axis=1).round(1)
+    if opts.get("hidden_gem"):
+        # 隱藏版：不看人氣（評論數），只看評分和預算
+        df["score"] = (parts["s_rating"] + parts["s_budget"]).round(1)
     df["_fit_order"] = df["budget_fit"].map({"within": 0, "partial": 1, "over": 2}).fillna(0)
     df["_over_order"] = df["min_price"].where(df["budget_fit"] == "over", 0)
     df["over_by"] = (df["min_price"] - budget).clip(lower=0).where(df["budget_fit"] == "over") \
@@ -167,13 +277,20 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     df["subtype_match"] = name_matches(df, kw) if kw else False
     df["_over"] = (df["budget_fit"] == "over").astype(int)
     df["_sub_order"] = (~df["subtype_match"]).astype(int)
-    df = df.sort_values(by=["_sub_order", "_over", "_fit_order", "_over_order", "score"],
-                        ascending=[True, True, True, True, False])
+    # 附近搜尋放寬範圍時：原本範圍內（例如 800 公尺）的店排在前面
+    df["_far"] = (df["distance"] > steps[0]).astype(int) if center else 0
+    df = df.sort_values(by=["_sub_order", "_over", "_far", "_fit_order", "_over_order", "score"],
+                        ascending=[True, True, True, True, True, False])
+    cats = opts.get("categories") or []
+    if len(cats) >= 2:
+        # 多個類別（「日式或韓式都可以」）：各類別輪流排，不會整批都是同一種
+        df["_cat_rank"] = df.groupby("category").cumcount()
+        df = df.sort_values(by=["_sub_order", "_over", "_cat_rank"], kind="mergesort")
 
     results = df.head(top_n).copy()
     has_within = bool((results["budget_fit"] == "within").any())
     results["maps_url"] = results.apply(maps_link, axis=1)
-    results["facts"] = results.apply(lambda r: describe_facts(r, budget, has_within), axis=1)
+    results["facts"] = results.apply(lambda r: describe_facts(r, budget, has_within, opts), axis=1)
     if subtype:
         results["facts"] = [
             ([f"店名看得出是{subtype}"] + [f for f in facts if not f.startswith("店名特色")]
@@ -186,7 +303,9 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     results.attrs["relaxed_budget"] = relaxed_budget if (results["budget_fit"] == "over").any() else None
     # 補完還是不到 top_n 家：算出放寬哪個條件可以多找到幾家
     results.attrs["alternatives"] = suggest_relaxations(all_df, district, category, party_size, budget,
-                                                         shown=len(results)) if len(results) < top_n else []
+                                                         shown=len(results), opts=opts) \
+        if len(results) < top_n else []
+    results.attrs.update(info)
     return results, None
 
 
@@ -199,35 +318,61 @@ def name_matches(df, keywords):
     return mask
 
 
-def apply_filters(df, district=None, category=None, party_size=None, budget=None, name_keywords=None):
+def apply_filters(df, district=None, category=None, party_size=None, budget=None, name_keywords=None,
+                  opts=None):
     """依條件篩選。預算是「每人上限」：
     價格區間（min_price ~ max_price）是 Google 的「多數人用餐花費」區間，不是最低／最高消費。
     - within  = 多數人的花費都在預算內（區間上限 ≤ 預算）→ 優先推薦
     - partial = 預算落在花費區間中間（區間下限 < 預算 < 上限）→ 排在後面，並標示
     - 區間下限 ≥ 預算的店（例如預算 800、多數人花 800~1000）不算符合預算，
-      只在符合的店不夠時，當作「比預算稍微高一點」的選擇補在最後"""
+      只在符合的店不夠時，當作「比預算稍微高一點」的選擇補在最後
+    opts：categories（多個類別）、avoid_categories、radius（要先有 distance 欄位）、
+          no_chain、hidden_gem、budget_min"""
+    opts = opts or {}
     if district and district != "全區":
         df = df[df['district'].str.contains(district, regex=False, na=False)]
-    if category and category != "不限":
-        in_category = df['category'].str.contains(category, regex=False, na=False)
+    cats = [c for c in (opts.get("categories") or []) if c] or ([category] if category and category != "不限" else [])
+    if cats:
+        in_category = pd.Series(False, index=df.index)
+        for c in cats:
+            in_category |= df['category'].str.contains(c, regex=False, na=False)
         if name_keywords:
             # 子類型：店名含關鍵字的店，就算原本被分在別的類別也算（例如壽喜燒店被分在燒肉）
             in_category |= name_matches(df, name_keywords)
         df = df[in_category]
+    if opts.get("avoid_categories"):
+        df = df[~df["category"].isin(opts["avoid_categories"])]
+    if opts.get("radius") and "distance" in df.columns:
+        df = df[df["distance"] <= opts["radius"]]
+    if opts.get("no_chain") and "is_chain" in df.columns:
+        df = df[~df["is_chain"]]
+    if opts.get("hidden_gem") and "is_hidden" in df.columns:
+        df = df[df["is_hidden"]]
     if party_size:
         df = df[(df['min_party'] <= party_size) & (df['max_party'] >= party_size)]
     if budget:
         df = df[df['min_price'] < budget]
+    if opts.get("budget_min"):
+        # 預算下限：多數人的花費至少要到這個金額（「不要太寒酸」「500 到 1000」）
+        df = df[df['max_price'] >= opts["budget_min"]]
     return df.copy()
 
 
-def relaxations_for(district=None, category=None, party_size=None, budget=None, exclude=None):
+def relaxations_for(district=None, category=None, party_size=None, budget=None, exclude=None, opts=None):
     """給 API 在「完全沒有結果」時使用。"""
     try:
         df = load_data()
         if exclude:
             df = df[~df["name"].isin(exclude)]
-        return suggest_relaxations(df, district, category, party_size, budget)
+        opts = dict(opts or {})
+        if opts.get("near"):
+            point = load_stations().get(opts["near"])
+            if point:
+                df = df.copy()
+                df["distance"] = distance_m(df, *point)
+                opts["radius"] = NEAR_STEPS[-1]
+                district = None
+        return suggest_relaxations(df, district, category, party_size, budget, opts=opts)
     except Exception:
         return []
 
@@ -239,34 +384,57 @@ def category_counts(district=None, party_size=None, budget=None):
     return [{"category": c, "count": int(n)} for c, n in counts.items()]
 
 
-def suggest_relaxations(df, district, category, party_size, budget, shown=0):
+def suggest_relaxations(df, district, category, party_size, budget, shown=0, opts=None):
     """結果太少時，建議放寬的方式，例如「不限地區 → 64 家」「預算 500 → 5 家」。
     shown：目前已經顯示幾家；建議要能找到比這更多的店才列出來。"""
-    current = max(len(apply_filters(df, district, category, party_size, budget)), shown)
+    opts = opts or {}
+    current = max(len(apply_filters(df, district, category, party_size, budget, opts=opts)), shown)
+    where = district or ("附近" if opts.get("radius") else "全台北")
     options = []
-    if district:
-        n = len(apply_filters(df, None, category, party_size, budget))
+
+    def count(**changes):
+        args = {"district": district, "category": category, "budget": budget, "opts": opts}
+        args.update(changes)
+        return len(apply_filters(df, args["district"], args["category"], party_size, args["budget"],
+                                 opts=args["opts"]))
+
+    if district or opts.get("radius"):
+        n = count(district=None, opts={**opts, "radius": None})
         if n > current:
             options.append({"reply": "不限地區", "text": f"全台北有 {n} 家符合", "count": n})
     if budget:
         for factor in (1.5, 2, 3):
             new_budget = int(math.ceil(budget * factor / 100) * 100)
-            n = len(apply_filters(df, district, category, party_size, new_budget))
+            n = count(budget=new_budget)
             if n > current:
-                where = district or "全台北"
                 options.append({"reply": f"預算 {new_budget}", "text": f"{where}有 {n} 家符合", "count": n})
                 break
-    if category:
-        n = len(apply_filters(df, district, None, party_size, budget))
+    if category or opts.get("categories"):
+        n = count(category=None, opts={**opts, "categories": None})
         if n > current:
-            where = district or "全台北"
             options.append({"reply": "類型都可以", "text": f"{where}各種料理共 {n} 家符合", "count": n})
+    if opts.get("no_chain"):
+        n = count(opts={**opts, "no_chain": False})
+        if n > current:
+            options.append({"reply": "連鎖店也可以", "text": f"{where}有 {n} 家符合", "count": n})
+    if opts.get("hidden_gem"):
+        n = count(opts={**opts, "hidden_gem": False})
+        if n > current:
+            options.append({"reply": "有名的也可以", "text": f"{where}有 {n} 家符合", "count": n})
+    if opts.get("budget_min"):
+        n = count(opts={**opts, "budget_min": None})
+        if n > current:
+            options.append({"reply": "便宜一點的也可以", "text": f"{where}有 {n} 家符合", "count": n})
     return options
 
 
-def describe_facts(row, budget=None, has_within=True):
+def describe_facts(row, budget=None, has_within=True, opts=None):
     """從資料推得出來的客觀事實，給 LLM 寫推薦理由（也是沒有 LLM 時的推薦理由）。"""
+    opts = opts or {}
     facts = []
+    if opts.get("hidden_gem") and row.get("is_hidden"):
+        facts.append(f"評論只有 {int(row['user_ratings_total'])} 則、評分卻有 {row['rating']}，"
+                     f"是比較少人知道的店")
     name = str(row["name"])
     tags = []
     for word, tag in NAME_KEYWORDS.items():
@@ -292,6 +460,8 @@ def describe_facts(row, budget=None, has_within=True):
 
     if budget and row["budget_fit"] == "within":
         facts.append(f"多數人的花費都在每人 {budget} 元預算內")
+    if row.get("is_chain"):
+        facts.append(f"連鎖品牌（資料裡有 {int(row['brand_count'])} 家店）")
     return facts
 
 
@@ -340,7 +510,8 @@ def to_records(results):
     """給 Pipe 顯示與 LLM 寫推薦理由用的資料。"""
     cols = ["name", "district", "category", "rating", "user_ratings_total",
             "min_price", "max_price", "score", "address", "maps_url", "budget_fit",
-            "over_by", "subtype_match", "facts", "summary", "highlights", "reviews"]
+            "over_by", "subtype_match", "facts", "summary", "highlights", "reviews",
+            "distance", "is_chain", "is_hidden"]
     cols = [c for c in cols if c in results.columns]
     records = [{k: (v.item() if hasattr(v, "item") else v) for k, v in r.items()}
                for r in results[cols].to_dict(orient="records")]
