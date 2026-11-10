@@ -513,47 +513,6 @@ def describe_facts(row, budget=None, has_within=True, opts=None):
     return facts
 
 
-def price_range(row):
-    """Google 的「$1-200」代表 200 元以下，顯示成比較自然的文字。"""
-    low, high = int(row["min_price"]), int(row["max_price"])
-    if low <= 1:
-        return f"${high} 以下"
-    return f"${low} - ${high}"
-
-
-def price_text(row):
-    """多數人用餐的花費區間（不是最低／最高消費）。"""
-    return f"多數人花費 {price_range(row)} / 人"
-
-
-def fallback_reason(facts):
-    """沒有 LLM 時，用事實組成推薦理由。"""
-    return "；".join(facts) + "。" if facts else ""
-
-
-def format_card(i, row, reason=""):
-    """一家餐廳的顯示文字。row 可以是 dict 或 pandas Series。"""
-    price = price_text(row)
-    if row.get("budget_fit") == "partial":
-        price += "（⚠️ 可能超出預算）"
-    lines = [
-        f"**{i}. {row['name']}**",
-        f"📍 {row['district']}・{row['category']}｜⭐ {row['rating']}"
-        f"（{int(row['user_ratings_total']):,} 則評論）｜💰 {price}",
-    ]
-    if reason:
-        lines.append(f"✨ {reason}")
-    lines.append(f"🏠 {row['address']}｜🗺️ [在 Google Maps 開啟]({row['maps_url']})")
-    return "\n".join(lines)
-
-
-def format_results(results):
-    """把餐廳結果轉成聊天介面顯示的文字。"""
-    cards = [format_card(i, row, fallback_reason(row["facts"]))
-             for i, (_, row) in enumerate(results.iterrows(), 1)]
-    return "\n\n---\n\n".join(cards)
-
-
 def to_records(results):
     """給 Pipe 顯示與 LLM 寫推薦理由用的資料。"""
     cols = ["name", "district", "category", "rating", "user_ratings_total",
@@ -568,14 +527,3 @@ def to_records(results):
             if isinstance(v, float) and math.isnan(v):
                 r[k] = None
     return records
-
-
-def filter_restaurants(district=None, category=None, party_size=None, budget=None, top_n=5):
-    """相容舊版：直接回傳顯示用文字。"""
-    results, error = search_restaurants(district, category, party_size, budget, top_n)
-    return error if error else format_results(results)
-
-
-if __name__ == "__main__":
-    print("🧪 測試篩選結果（大安區、燒肉、2人、預算 1000 元）：\n")
-    print(filter_restaurants(district="大安區", category="燒肉", party_size=2, budget=1000))

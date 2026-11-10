@@ -1,20 +1,25 @@
 """
 詞庫、提示詞與文字處理（地區、類別、子類型、地標、同音錯字、捷運站）。
-自動產生的資料（站名、拼音表）在 data/lexicon_generated.json，由 tools/build_lookups.py 產生。
+捷運站名從 data/mrt_stations.csv 讀；同音錯字的拼音表在 data/lexicon_generated.json。
+兩個檔案都由 tools/build_lookups.py 產生。
 """
+import csv
 import json
 import os
 import re
 from typing import Optional
 
-_GENERATED = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                          "data", "lexicon_generated.json")
+_STATIONS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "mrt_stations.csv")
 try:
-    with open(_GENERATED, encoding="utf-8") as _f:
+    with open(_STATIONS, encoding="utf-8") as _f:
+        MRT_STATIONS = [row["name"] for row in csv.DictReader(_f)]
+except FileNotFoundError:
+    MRT_STATIONS = []
+try:
+    with open(os.path.join(os.path.dirname(_STATIONS), "lexicon_generated.json"), encoding="utf-8") as _f:
         _gen = json.load(_f)
 except FileNotFoundError:
     _gen = {}
-MRT_STATIONS = _gen.get("MRT_STATIONS", [])
 TERM_READINGS = _gen.get("TERM_READINGS", {})
 PINYIN_CHARS = _gen.get("PINYIN_CHARS", {})
 
@@ -93,7 +98,7 @@ PARSE_PROMPT = f"""你是台北餐廳推薦系統的「搜尋條件抽取器」�
   只是沒提到的欄位不要放進來；使用者說「不知道」「不確定」「沒想法」不算不限，不要放進來。
 - choose_category：true＝使用者請你幫他挑一種料理（例如問你推薦吃什麼、要你決定吃什麼）；沒有就填 null。
   這時 intent 是 search（不是 chat），category 填 null，不要自己挑。
-  上一次的料理類型是你幫使用者挑的，而使用者說換一種、換別的類型時，choose_category 也是 true。
+  使用者說換一種、換別的類型，但沒說要換成哪一種時（不管上一次的類型是誰決定的），choose_category 也是 true。
 - 以下欄位只看使用者「最後一句話」，沒提到就填 null 或空陣列（沒提到不可以填 false）：
   reject：不喜歡的店，只能從「最近推薦過的店」清單選，「第 2 間」就是清單第 2 家。
   keep：換一批時要保留的店（例如「第 1 間留著」），只能從「最近推薦過的店」清單選。
@@ -120,7 +125,7 @@ PARSE_PROMPT = f"""你是台北餐廳推薦系統的「搜尋條件抽取器」�
   同義詞要對應，例如麻辣鍋、壽喜燒、羊肉爐→火鍋，壽司→日式料理，韓國菜→韓式料理，小吃、夜市→平價小吃，
   早餐→早午餐，蛋糕、下午茶→甜點，喝酒→酒吧，中菜、合菜→中式餐廳，漢堡、牛排→美式餐廳。
 - 中文數字要轉成數字（一千＝1000、1k＝1000）。
-- 總預算（總共、一共、加起來）要除以人數換成每人；還不知道人數時 budget 填 null。
+- 總預算（總共、一共、加起來）：total_budget 填總金額（不要除以人數），budget 填 null，程式會自己換算。
 - 預算是區間時，budget 填上限、budget_min 填下限；只說「X 以上」時 budget 填 null、budget_min 填 X。
 - 「再便宜一點」（要調低預算，不是「越便宜越好」）：budget 變成原本的 0.7 倍（取整數）。
 - 使用者可能打錯同音字或近音字，請依讀音判斷原本的意思。
@@ -136,6 +141,7 @@ REASON_PROMPT = """你是台北餐廳推薦助理。根據使用者的需求和�
 - 只有 reviews 有內容時才可以提到顧客評論。
 - 只有資料裡有 distance 時才可以提到距離或「附近」。
 - 不要寫推薦指數、分數或計算方式。不要每家都用一樣的句型開頭。
+- 預算都是「每人」的金額。不要自己把預算乘上人數算出總共多少錢（條件裡有寫總預算時才可以提）。
 - 不要在推薦理由裡提預算超出：價格超出預算的店，畫面上已經另外標示了。
 - 不要提到「系統」「系統說明」「資料」這些字眼，直接用自然的方式說。
 - intro 是簡短的開場（一到三句），自然地回應使用者最新那句話。
@@ -300,17 +306,10 @@ SUBTYPES = {
     "精釀啤酒": ("酒吧", ["精釀", "啤酒"], ["精釀", "啤酒", "beer", "brew"], False),
 }
 
-# 總預算的說法：「總預算1500」「總共1500」「全部加起來 2000」→ 會除以人數換算成每人預算
-TOTAL_RE = r"(?:總預算|預算總共|預算一共|預算合計|全部加起來|加起來|總共|總計|一共|合計)"
-BUDGET_FILLER = r"\s*(?:大概|大約|約|差不多|抓|在|是|最多|頂多|上限|不超過|：|:)*\s*"
 # 「推薦別的」：沿用上一次的條件，排除已經推薦過的店
 MORE_WORDS = ["別的", "別家", "別間", "換一批", "換一些", "換幾間", "換幾家", "其他選擇", "其他的",
               "其他間", "其他家", "還有嗎", "還有沒有", "還有其他", "再推薦", "再給我", "下一批",
               "更多選擇", "不要這些", "不要這幾"]
-# 「有什麼類型可以選」：列出料理類型
-CATEGORY_QUESTION_RE = (r"(?:什麼|甚麼|哪些|哪幾種|哪種|啥|有什麼|有甚麼).{0,4}(?:類型|種類|類別|料理|選擇|可以吃|能吃|好吃的)"
-                        r"|(?:類型|種類|類別|料理).{0,3}(?:有哪些|有什麼|有甚麼|可以選)")
-
 # 「日式」「韓式」後面直接接別的類別時（「日式燒肉」「韓式炸雞」），只是形容，不算另一個類別
 STYLE_WORDS = {"日式", "韓式", "美式", "義式", "意式", "泰式", "中式", "台式", "港式", "日本", "韓國"}
 
@@ -319,7 +318,7 @@ STYLE_WORDS = {"日式", "韓式", "美式", "義式", "意式", "泰式", "中�
 PERSON_PREFS = {"no_chain"}
 # LLM 判斷「取消」某個偏好時，使用者原話裡要有這些字才採用
 PREF_OFF_WORDS = {"no_chain": ["連鎖"], "hidden_gem": ["有名", "知名", "熱門", "隱藏", "人氣"]}
-# 地標 → 最近的捷運站（站名清單 MRT_STATIONS 在 data/lexicon_generated.json）
+# 地標 → 最近的捷運站（站名清單 MRT_STATIONS 從 data/mrt_stations.csv 讀）
 LANDMARKS = {
     "台北101": "台北101/世貿", "臺北101": "台北101/世貿", "101大樓": "台北101/世貿", "世貿": "台北101/世貿",
     "信義商圈": "市政府", "新光三越": "市政府", "微風南山": "台北101/世貿", "誠品信義": "市政府",

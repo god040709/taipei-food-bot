@@ -55,9 +55,7 @@ class Pipe:
 
     # ---------------- 呼叫 API ----------------
     def _api_url(self) -> str:
-        url = self.valves.API_URL.strip().rstrip("/")
-        # 舊版的設定是 …/recommend，自動改成 …/chat
-        return re.sub(r"/(recommend|categories)$", "", url) + "/chat" if not url.endswith("/chat") else url
+        return self.valves.API_URL.strip().rstrip("/")
 
     def _options(self) -> dict:
         return {k: getattr(self.valves, k) for k in ("USE_LLM_PARSER", "USE_LLM_REASON", "SHOW_CONDITIONS",
@@ -123,6 +121,6 @@ class Pipe:
             if data.get("type") == "reply":
                 return data.get("content", "")
             if data.get("type") != "llm":
-                return "❌ 機器人 API 回應的格式不對，可能是 api.py 還是舊版，請在虛擬機上 git pull 後重開 api.py。"
+                return "❌ 機器人 API 回應的格式不對，請確認齒輪裡的 Api Url 是 api.py 的 /chat。"
             payload["llm_results"] = list(data.get("llm_results") or []) + [self._ask_llm(data["request"])]
         return "❌ 這則訊息問了 LLM 太多次，已停止。"

@@ -1,8 +1,8 @@
 """
-查餐廳的服務：/recommend、/categories 的內容。api.py 和機器人（bot.py）都用這裡的函式。
+查餐廳的服務：機器人（bot.py）用這裡的函式查餐廳、算各類型的家數。
 """
 from recommender import (
-    category_counts, format_results, relaxations_for, search_restaurants, subtype_overview, to_records,
+    category_counts, relaxations_for, search_restaurants, subtype_overview, to_records,
 )
 
 
@@ -34,10 +34,10 @@ def handle_recommend(data: dict) -> dict:
     if error:
         return {"result": error, "restaurants": [], "matched": 0,
                 "alternatives": relaxations_for(**conditions, exclude=exclude, opts=opts), **overview}
-    # result：顯示用文字；restaurants：結構化資料，給 LLM 寫推薦理由
+    # restaurants：結構化資料（畫面和 LLM 寫推薦理由都用這個）
     # matched：符合條件的餐廳總數；matched_within：價格完全在預算內的家數
     # alternatives：結果太少時，放寬條件的建議
-    return {"result": format_results(results), "restaurants": to_records(results),
+    return {"restaurants": to_records(results),
             "matched": results.attrs.get("matched", len(results)),
             "matched_within": results.attrs.get("matched_within", len(results)),
             "alternatives": results.attrs.get("alternatives", []),

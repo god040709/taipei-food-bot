@@ -11,12 +11,12 @@ from typing import Optional
 import service
 from recommender import BUDGET_STEP  # 預算的一個級距（200 元）
 from lexicon import (  # 詞庫、提示詞、文字處理
-    ASK_HINT_WORDS, ASK_MARK, BUDGET_FILLER, BUDGET_UP_WORDS, CATEGORIES, CATEGORY_QUESTION_RE, CATEGORY_SYNONYMS,
+    ASK_HINT_WORDS, ASK_MARK, BUDGET_UP_WORDS, CATEGORIES, CATEGORY_SYNONYMS,
     CHAT_MARK, CHAT_PROMPT, CHOOSE_MARK, CN_INDEX, DEBUG_MARK, DISTRICTS, FIELDS, FIELD_SKIP_WORDS, LABELS,
     MORE_WORDS, MRT_STATIONS, NEAR_ASK_MARK, NEG_AFTER_RE, NEW_REQUEST_MARK, NEG_BEFORE_RE, NUM, PARSE_PROMPT, PERSON_PREFS,
     PREF_OFF_WORDS, QUESTIONS, REASON_PROMPT, REJECTED_MARK, REJECT_SOFT, REJECT_STRONG,
     RELAXES, RELAX_LABELS, RESET_MARK, RESET_WORDS, SAY_PROMPT, SKIP_WORDS, SORTS, SORT_LABELS, STYLE_WORDS, SUBTYPES,
-    TOTAL_RE, UNSURE_WORDS, find_near, fix_homophones, to_number,
+    UNSURE_WORDS, find_near, fix_homophones, to_number,
 )
 from llm import LLMError
 
@@ -120,7 +120,7 @@ class Bot:
         # 預算：「預算1000」「預算一千」「1000元」「500以內」「一人500」「每人一千」「1k」
         filler = r"\s*(?:大概|大約|約|差不多|抓|在|是|最多|頂多|上限|不超過|：|:)*\s*"
         budget_patterns = [
-            r"預算" + filler + NUM,
+            r"(?<!總)預算" + filler + NUM,  # 「總預算」是總金額，交給 LLM 換算，規則不當成每人預算
             r"(?:一人|每人|每位|一位)" + filler + NUM,
             NUM + r"\s*(?:元|塊|以內|以下)",
             NUM + r"\s*(?:元|塊)?\s*(?:左右|上下)",
@@ -163,6 +163,7 @@ class Bot:
             "category": nullable("string", CATEGORIES),
             "party_size": nullable("integer"),
             "budget": nullable("integer"),
+            "total_budget": nullable("integer"),
             "waived": array(FIELDS),
             "choose_category": nullable("boolean"),
             "reject": array(recent_names or None),
@@ -192,7 +193,7 @@ class Bot:
             if not isinstance(content, str) or role not in ("user", "assistant"):
                 continue
             if role == "user":
-                lines.append(f"使用者：{fix_homophones(content[:300])[0]}")
+                lines.append(f"使用者：{fix_homophones(content[:300])[0]}")  # 先修好錯字再交給 LLM
             elif content.startswith(ASK_MARK):
                 lines.append(f"助理（反問）：{content[:200]}")
             elif content.startswith(CHAT_MARK):
@@ -226,6 +227,7 @@ class Bot:
         intent = data.get("intent") if data.get("intent") in intents else "search"
         return {"district": district, "category": category,
                 "party_size": to_int(data.get("party_size")), "budget": to_int(data.get("budget")),
+                "total_budget": to_int(data.get("total_budget")),
                 "intent": intent, "reject": [n for n in as_list(data.get("reject")) if n in recent_names],
                 "waived": {f for f in as_list(data.get("waived")) if f in FIELDS},
                 "keep": [n for n in as_list(data.get("keep")) if n in recent_names],
@@ -365,15 +367,6 @@ class Bot:
                 found.append((parent == category, hit, name))
         return max(found)[2] if found else None
 
-    @staticmethod
-    def total_budget(texts: list) -> Optional[int]:
-        """這次需求裡提到的「總預算」（不是每人），沒有就回傳 None。"""
-        for text in reversed(texts):
-            m = re.search(TOTAL_RE + BUDGET_FILLER + NUM, text)
-            if m:
-                return to_number(m.group(1))
-        return None
-
     # ------------------------------------------------------------------
     # 其他條件：捷運站附近、不要連鎖、隱藏版、預算下限、不要的類別、多類別、類似某間
     # ------------------------------------------------------------------
@@ -406,25 +399,15 @@ class Bot:
                 start = lower.find(w, end)
         return sorted(found)
 
-    def parse_prefs(self, text: str) -> dict:
-        """規則抓得到的其他條件：車站／地標、預算區間，以及用類別詞庫就判斷得出的「不要的類別」
-        「多類別」（LLM 掛掉時的備案）。不要連鎖、隱藏版、資料沒有的條件交給 LLM 判斷。"""
+    def rule_prefs(self, text: str) -> dict:
+        """規則判斷的其他條件，都是 LLM 實測讀錯過、留著當保險的（沒有 LLM 時也用得到）：
+        捷運站／地標（LLM 會把「西門町」換成行政區）、不要的類別（「剛吃過火鍋」）、多類別（「日式或韓式」）。
+        其他條件（預算區間、不要連鎖、隱藏版…）都交給 LLM。"""
         t = fix_homophones(text)[0]
         p = {}
         near = find_near(t)
         if near:
             p["near"], p["near_label"] = near
-        # 預算區間「500 到 1000」→ 下限 500、上限 1000；「1000 以上」→ 只有下限
-        m = re.search(NUM + r"\s*(?:元|塊)?\s*(?:到|至|~|～|-|－)\s*" + NUM + r"\s*(?:元|塊)?(?!\s*個?\s*(?:人|位))", t)
-        lo = hi = None
-        if m:
-            lo, hi = to_number(m.group(1)), to_number(m.group(2))
-        if lo and hi and 50 <= lo < hi:
-            p["budget_min"], p["budget_max"] = lo, hi
-        else:
-            m = re.search(NUM + r"\s*(?:元|塊)?\s*(?:以上|起跳)", t)
-            if m and (to_number(m.group(1)) or 0) >= 50:
-                p["budget_min"] = to_number(m.group(1))
         mentions = self.category_mentions(t)
         avoid = list(dict.fromkeys(c for _, c, neg in mentions if neg))
         want = list(dict.fromkeys(c for _, c, neg in mentions if not neg))
@@ -478,15 +461,13 @@ class Bot:
         llm_prefs = llm_prefs or {}
         rule_near = False
         for text in texts:
-            p = self.parse_prefs(text)
+            p = self.rule_prefs(text)
             if "near" in p:
                 prefs["near"], prefs["near_label"] = p["near"], p["near_label"]
                 rule_near = True
             elif self.parse_user_query(text)[0]:  # 改說行政區 → 不再是「某站附近」
                 prefs.pop("near", None)
                 prefs.pop("near_label", None)
-            if "budget_min" in p:
-                prefs["budget_min"] = p["budget_min"]
             if p.get("cats"):
                 prefs["cats"] = p["cats"]
             if p.get("avoid"):
@@ -511,7 +492,7 @@ class Bot:
         if llm_prefs.get("cats"):
             prefs["cats"] = llm_prefs["cats"]
         elif any(self.parse_user_query(t)[1] for t in texts) and \
-                not any(self.parse_prefs(t).get("cats") for t in texts):
+                not any(self.rule_prefs(t).get("cats") for t in texts):
             prefs.pop("cats", None)  # 改說單一類別 → 不再是「日式或韓式」
         if llm_prefs.get("avoid"):
             prefs["avoid"] = list(dict.fromkeys(prefs.get("avoid", []) + llm_prefs["avoid"]))
@@ -523,10 +504,7 @@ class Bot:
             prefs.pop("budget_min", None)
         if "category" in waived:
             prefs.pop("cats", None)
-        # 只對這一句有效的：預算上限（區間）、資料沒有的條件
-        last = self.parse_prefs(texts[-1]) if texts else {}
-        if last.get("budget_max"):
-            prefs["budget_max"] = last["budget_max"]
+        # 只對這一句有效的：資料沒有的條件
         if llm_prefs.get("unsupported"):
             prefs["unsupported"] = llm_prefs["unsupported"]
         return {k: v for k, v in prefs.items() if v not in (None, False, [], "")}
@@ -539,7 +517,7 @@ class Bot:
         if intent == "new":
             return True
         district, category, party_size, budget = self.parse_user_query(texts[0])
-        where = district or self.parse_prefs(texts[0]).get("near")
+        where = district or self.rule_prefs(texts[0]).get("near")
         what = category or self.detect_subtype(fix_homophones(texts[0])[0], None)
         return sum(bool(x) for x in (where, what, party_size, budget)) >= 3
 
@@ -565,7 +543,7 @@ class Bot:
     def get_conditions(self, messages: list):
         """回傳 (條件 tuple, 解析方式, info)。
         info：total（總預算）、subtype（子類型）、intent / reject（LLM 判斷的意圖與不喜歡的店）、
-              prefs（其他條件）、fixes（同音錯字修正）、llm_note（LLM 沒用上的原因，顯示在條件行）。
+              prefs（其他條件）、llm_note（LLM 沒用上的原因，顯示在條件行）。
         有 LLM 時以 LLM 為主；LLM 沒填的欄位用規則補上。總預算會除以人數，換算成每人預算。"""
         source = "規則"
         info = {"intent": None, "reject": [], "llm_note": "", "llm_prefs": {}, "llm_waived": set(),
@@ -607,7 +585,7 @@ class Bot:
                 info["choose_category"] = d["choose_category"]
                 info.update(keep=d["keep"], outside_area=d["outside_area"], unknown_food=d["unknown_food"])
                 source = "LLM"
-                info.update(intent=d["intent"], reject=d["reject"], llm_prefs=d["prefs"])
+                info.update(intent=d["intent"], reject=d["reject"], llm_prefs=d["prefs"], total=d["total_budget"])
             except LLMError as e:
                 info["llm_note"] = e.note
             except Exception as e:
@@ -645,10 +623,9 @@ class Bot:
             info["choose_category"] = False
 
         fixed_texts = [fix_homophones(t)[0] for t in texts]
-        info["fixes"] = fix_homophones(texts[-1])[1] if texts else []
 
-        # 總預算：有人數就換算成每人；還不知道人數就先不填，等問完人數再算
-        total = self.total_budget(fixed_texts)
+        # 總預算（LLM 讀出來的）：有人數就換算成每人；還不知道人數就先不填，等問完人數再算
+        total = info.pop("total", None)
         district, category, party_size, budget = conditions
         if total:
             budget = total // party_size if party_size else None
@@ -681,8 +658,6 @@ class Bot:
         if new_request:
             old = {k: v for k, v in self.previous_prefs(messages).items() if k not in PERSON_PREFS}
             info["dropped_prefs"] = self.prefs_text(old).replace("｜", "、")
-        if prefs.get("budget_max"):
-            budget = prefs["budget_max"]  # 「500 到 1000」→ 上限 1000
         if prefs.get("budget_min") and budget and budget <= prefs["budget_min"]:
             budget = None  # 「1000 以上」：1000 是下限，不是上限
         if prefs.get("cats"):
@@ -837,39 +812,22 @@ class Bot:
     # ------------------------------------------------------------------
     # 使用者問「有什麼類型可以選」→ 列出料理類型
     # ------------------------------------------------------------------
-    @staticmethod
-    def is_category_question(text: str) -> bool:
-        if any(c in text for c in CATEGORIES):
-            return False  # 已經說了想吃的類型，例如「有什麼火鍋推薦」
-        if any(t.lower() in text.lower() for _, triggers, _, _ in SUBTYPES.values() for t in triggers):
-            return False  # 說了子類型，例如「有什麼壽喜燒」
-        if any(w in text for words in FIELD_SKIP_WORDS.values() for w in words):
-            return False  # 「什麼都可以吃」是「不限」，不是在問
-        return re.search(CATEGORY_QUESTION_RE, text) is not None
-
     def list_categories(self, conditions) -> str:
         district, _, party_size, budget = conditions
-        counts = {}
-        try:
-            r = service.handle_categories({"district": district, "party_size": party_size, "budget": budget})
-            counts = {c["category"]: c["count"] for c in r.get("categories", [])}
-        except Exception:
-            pass  # API 舊版或連不到：只列類型，不列家數
+        r = service.handle_categories({"district": district, "party_size": party_size, "budget": budget})
+        counts = {c["category"]: c["count"] for c in r.get("categories", [])}
 
         where = district or "全台北"
         if budget:
             where += f"、每人 {budget} 元內"
-        order = sorted(CATEGORIES, key=lambda c: -counts.get(c, 0)) if counts else CATEGORIES
-        lines = [f"{ASK_MARK}這些料理類型都可以選（{where}）：", ""]
-        if counts:
-            lines += ["| 類型 | 店家數 | 也可以這樣說 |", "|---|---|---|"]
-        else:
-            lines += ["| 類型 | 也可以這樣說 |", "|---|---|"]
+        order = sorted(CATEGORIES, key=lambda c: -counts.get(c, 0))
+        lines = [f"{ASK_MARK}這些料理類型都可以選（{where}）：", "",
+                 "| 類型 | 店家數 | 也可以這樣說 |", "|---|---|---|"]
         for c in order:
-            if counts and not counts.get(c):
+            if not counts.get(c):
                 continue  # 這個條件下沒有店的類型就不列
             examples = "、".join(CATEGORY_SYNONYMS.get(c, [])[:3]) or "—"
-            lines.append(f"| {c} | {counts[c]} 家 | {examples} |" if counts else f"| {c} | {examples} |")
+            lines.append(f"| {c} | {counts[c]} 家 | {examples} |")
         lines += ["", "想吃哪一種？直接回覆類型就可以，例如「燒肉」；"
                       "還沒決定的話，回「類型都可以」我就從各種料理裡挑。"]
         return "\n".join(lines)
@@ -1013,7 +971,7 @@ class Bot:
     # 推薦理由（每家一段，寫餐廳特色）
     # ------------------------------------------------------------------
     def write_reasons(self, texts: list, conditions, restaurants: list, subtype=None, unsupported=None,
-                      notes=None):
+                      notes=None, budget_min=None):
         """回傳 (開場白, 每家的推薦理由 list)。LLM 不能用時，用資料中的事實組成理由。
         unsupported：使用者提到、但資料沒有的條件（例如包廂、停車），不可以說店家符合。
         notes：要讓開場提到的事（例如這次依什麼排序、為什麼沒辦法依距離排）。"""
@@ -1024,7 +982,8 @@ class Bot:
         district, category, party_size, budget = conditions
         need = "；".join(fix_homophones(t)[0] for t in texts[-4:])
         cond = (f"地區={district or '不限'}，類型={category or '不限'}，"
-                f"人數={party_size or '不限'}，每人預算上限={budget or '不限'}")
+                f"人數={party_size or '不限'}，每人預算上限={budget or '不限'}"
+                + (f"，每人預算下限={budget_min}（每人至少花這麼多）" if budget_min else ""))
         if subtype:
             cond += (f"，想吃的子類型={subtype}（subtype_match=true 代表店名看得出是{subtype}；"
                      f"false 的店不可以說它有{subtype}）")
@@ -1127,7 +1086,7 @@ class Bot:
     def pref_texts(prefs: dict) -> list:
         """除錯模式：其他條件寫成中文（「強調＝評價優先」「不要連鎖」）。"""
         names = {"near": "捷運站", "budget_min": "預算下限", "avoid": "不要的類別", "cats": "多類別",
-                 "unsupported": "資料沒有的條件", "budget_max": "預算上限"}
+                 "unsupported": "資料沒有的條件"}
         out = []
         for k, v in prefs.items():
             if k == "sort":
@@ -1201,16 +1160,12 @@ class Bot:
         total, subtype = info["total"], info["subtype"]
 
         prefs = info["prefs"]
-        said = self.parse_prefs(user_text)  # 這一句提到的其他條件
+        said = self.rule_prefs(user_text)  # 這一句規則讀得到的其他條件（捷運站、不要的類別、多類別）
         if info["intent"] == "reset":
             return self.reset_reply(user_text)
 
-        # 問「有什麼類型可以選」→ 列出料理類型
-        if source == "LLM":
-            category_question = info["intent"] == "categories"  # 「不管是什麼類型」不會被誤判
-        else:
-            category_question = self.is_category_question(user_text) and not said.get("near")
-        if category_question:
+        # 問「有什麼類型可以選」→ 列出料理類型（LLM 判斷）
+        if info["intent"] == "categories":
             return self.list_categories(conditions)
 
         last_names = self.last_recommended(messages)
@@ -1364,8 +1319,8 @@ class Bot:
         if rejects:
             sections.append(REJECTED_MARK + "".join(f"「{n}」" for n in rejects))
         fallback = f"💬 {'；'.join(facts)}。" if facts else ""
-        if not restaurants or "maps_url" not in restaurants[0]:
-            # 沒有結果，或 api.py 還是舊版：直接顯示 API 的文字
+        if not restaurants:
+            # 沒有結果：顯示原因（例如找不到符合條件的店）
             if fallback:
                 sections.append(fallback)
             if more and shown:
@@ -1387,7 +1342,7 @@ class Bot:
         if prefs.get("sort") and not no_location:
             notes.append(f"這批店依「{SORT_LABELS[prefs['sort']]}」排序，開場可以順帶提一下")
         intro, reasons = self.write_reasons(texts, reason_conditions, restaurants, subtype,
-                                            prefs.get("unsupported"), notes)
+                                            prefs.get("unsupported"), notes, prefs.get("budget_min"))
         if intro:
             sections.append(f"💬 {intro}")
         elif fallback:

@@ -2,9 +2,7 @@
 產生機器人用的查詢資料（只需要在本機跑，虛擬機和 Open WebUI 不用安裝任何套件）：
 
 1. data/mrt_stations.csv：台北市捷運站座標（找「捷運站附近」的店）
-2. data/lexicon_generated.json：
-   - MRT_STATIONS：站名清單（判斷使用者說的是不是車站）
-   - TERM_READINGS / PINYIN_CHARS：同音錯字比對用的拼音表
+2. data/lexicon_generated.json：同音錯字比對用的拼音表（TERM_READINGS / PINYIN_CHARS）
 
 用法：
     pip install pypinyin
@@ -82,7 +80,7 @@ def main(geojson=None):
     table = {r: "".join(chs) for r, chs in sorted(table.items())}
 
     with open(GENERATED, "w", encoding="utf-8", newline="\n") as f:
-        json.dump({"MRT_STATIONS": list(stations), "TERM_READINGS": term_readings, "PINYIN_CHARS": table},
+        json.dump({"TERM_READINGS": term_readings, "PINYIN_CHARS": table},
                   f, ensure_ascii=False)
     size = sum(len(v) for v in table.values())
     print(f"寫入 {GENERATED}：{len(terms)} 個詞、拼音表 {len(table)} 個讀音／{size} 個字")
