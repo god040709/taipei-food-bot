@@ -15,8 +15,6 @@ STATIONS_PATH = os.path.join(BASE_DIR, "data", "mrt_stations.csv")
 
 # 「捷運站附近」的範圍（公尺）：先找 800 公尺（走路約 10 分鐘），不夠再放寬
 NEAR_STEPS = (800, 1500)
-# 「跟某間差不多的」：以那間店為中心找同類型的店
-SIMILAR_STEPS = (1500, 3000)
 # 「隱藏版」：評分夠高、評論數至少這麼多（太少的評分不可靠），且少於同區同類型的中位數
 HIDDEN_MIN_RATING = 4.3
 HIDDEN_MIN_REVIEWS = 50
@@ -164,7 +162,6 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
         關鍵字太廣的子類型（例如「麵」）設 False，只在原本類別裡比對。
     opts：其他條件（都可以不給）
         near：捷運站名，找附近的店（不限行政區）
-        similar_to：店名，找和這家同類型、附近、價位相近的店
         categories：多個類別（「日式或韓式都可以」）
         avoid_categories：不要的類別（「剛吃過拉麵」）
         no_chain：不要連鎖店；hidden_gem：隱藏版；budget_min：每人預算下限"""
@@ -178,21 +175,9 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     opts = dict(opts or {})
     info = {}
 
-    # 「跟某間差不多的」：以那家店為中心，同類型、價位相近
-    center, steps = None, None
-    if opts.get("similar_to"):
-        ref = all_df[all_df["name"] == opts["similar_to"]]
-        if len(ref):
-            ref = ref.iloc[0]
-            center, steps = (float(ref["lat"]), float(ref["lng"])), SIMILAR_STEPS
-            category, district = ref["category"], None
-            opts["categories"] = None
-            if not budget:
-                budget = int(math.ceil(float(ref["max_price"]) / 50) * 50)
-            exclude = list(exclude or []) + [ref["name"]]
-            info["similar"] = {"name": ref["name"], "category": ref["category"], "budget": budget}
     # 「捷運站附近」：以車站為中心，不限行政區
-    if center is None and opts.get("near"):
+    center, steps = None, None
+    if opts.get("near"):
         point = load_stations().get(opts["near"])
         if point:
             center, steps = point, NEAR_STEPS
@@ -494,8 +479,6 @@ def describe_facts(row, budget=None, has_within=True, opts=None):
 
     if budget and row["budget_fit"] == "within":
         facts.append(f"多數人的花費都在每人 {budget} 元預算內")
-    if row.get("is_chain"):
-        facts.append(f"連鎖品牌（資料裡有 {int(row['brand_count'])} 家店）")
     return facts
 
 

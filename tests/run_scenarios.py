@@ -7,7 +7,7 @@
     python tests/run_scenarios.py --update              # 把這次的結果存成新的 tests/golden/rules.txt
     python tests/run_scenarios.py --pipe URL            # 透過 openwebui_pipe.py → API（URL 例如 http://127.0.0.1:5000/chat）
     python tests/run_scenarios.py --llm                 # 用真的 LLM（需要環境變數 LLM_API_KEY；會先顯示呼叫上限）
-    python tests/run_scenarios.py --only 子類型 --dropped   # 只跑名稱含「子類型」的情境；--dropped 連已拿掉的功能一起跑
+    python tests/run_scenarios.py --only 子類型           # 只跑名稱含「子類型」的情境
 """
 import argparse
 import difflib
@@ -19,7 +19,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 
-from scenarios import DROPPED_SCENARIOS, SCENARIOS  # noqa: E402
+from scenarios import SCENARIOS  # noqa: E402
 
 GOLDEN = os.path.join(ROOT, "tests", "golden", "rules.txt")
 
@@ -42,7 +42,7 @@ def make_client(args):
 
 
 def run(args) -> str:
-    scenarios = SCENARIOS + (DROPPED_SCENARIOS if args.dropped else [])
+    scenarios = SCENARIOS
     if args.only:
         scenarios = [s for s in scenarios if args.only in s[0]]
     chat, llm = make_client(args)
@@ -68,7 +68,6 @@ def main():
     parser.add_argument("--llm", action="store_true")
     parser.add_argument("--max-calls", type=int, default=120)
     parser.add_argument("--only")
-    parser.add_argument("--dropped", action="store_true")
     parser.add_argument("--out")
     args = parser.parse_args()
     if args.llm:

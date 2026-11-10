@@ -7,10 +7,13 @@
 ```
 使用者在 Open WebUI 輸入需求
         │
-openwebui_pipe.py      解析需求（規則解析，或 LLM 解析）
-        │  POST /recommend
-api.py                 推薦 API（預設 port 5000）
+openwebui_pipe.py      只負責轉送（約 130 行，貼一次就不用再改）
+        │  POST /chat                     ▲ 需要 LLM 時，API 回「請幫我問這個」，
+        │                                 │ pipe 用 Open WebUI 裡設定的金鑰去問，再把答案送回 API
+api.py                 機器人 API（預設 port 5000）
         │
+src/bot.py             對話流程：理解需求 → 反問／排除／換一批 → 查餐廳 → 組合回覆
+src/lexicon.py         詞庫與提示詞（地區、類別、子類型、地標、同音錯字）
 src/recommender.py     篩選 → 計算推薦指數 → 取前 5 名
         │
 data/taipei_all_restaurants.csv   台北 12 區 × 14 類，約 2,900 家餐廳
@@ -18,18 +21,26 @@ data/taipei_all_restaurants.csv   台北 12 區 × 14 類，約 2,900 家餐廳
 collector_taipei.py    從 Google Places API (New) 採集資料
 ```
 
+**API 不保存、也不使用任何 LLM 金鑰。**金鑰只填在 Open WebUI 的函式設定裡，別人就算連到你的 API，也用不到你的 LLM 額度。每個人都在自己的環境架一份，用自己的金鑰。
+
 ## 檔案說明
 
 | 檔案 | 用途 |
 |---|---|
-| `openwebui_pipe.py` | Open WebUI 的 Pipe 函式，負責解析需求、呼叫 API、組合回答 |
-| `api.py` | 推薦 API。有 Flask 用 Flask，沒有則用 Python 內建伺服器 |
+| `openwebui_pipe.py` | Open WebUI 的 Pipe 函式：把對話轉給 API，API 需要 LLM 時代問 |
+| `api.py` | 機器人 API（`/chat`、`/recommend`、`/categories`）。有 Flask 用 Flask，沒有則用 Python 內建伺服器 |
+| `src/bot.py` | 對話流程：理解需求、反問、不喜歡／換一批、組合回覆 |
+| `src/lexicon.py` | 詞庫、提示詞、同音錯字與捷運站的判斷 |
+| `src/llm.py` | 呼叫 LLM 的方式（API 用的「請 pipe 代問」、本機測試用的直接呼叫） |
+| `src/service.py` | 查餐廳（`/recommend`、`/categories` 的內容） |
 | `src/recommender.py` | 推薦核心：篩選、加權推薦指數、Google Maps 連結 |
 | `collector_taipei.py` | 資料採集（需要 Google API 金鑰，平常不用執行） |
 | `enrich_features.py` | 補充餐廳特色：簡介、服務特色、評論摘錄（需要 Google API 金鑰，選用） |
 | `data/taipei_all_restaurants.csv` | 餐廳資料 |
 | `data/mrt_stations.csv` | 台北市捷運站座標（找「捷運站附近」用） |
+| `data/lexicon_generated.json` | 站名清單、同音錯字拼音表（由 `tools/build_lookups.py` 產生） |
 | `tools/build_lookups.py` | 產生捷運站座標與同音錯字拼音表（只在本機跑，需要 `pypinyin`） |
+| `tests/` | 對話情境測試（`run_scenarios.py`）與比對基準（`golden/`） |
 | `eval/` | 成效評估：測試問題與評估腳本 |
 
 ## 快速開始
@@ -62,14 +73,14 @@ nohup env HOST=0.0.0.0 python api.py > api.log 2>&1 &
 
 `HOST=0.0.0.0` 讓 Open WebUI 容器連得到；`nohup` 讓 API 在背景持續執行。
 
-測試 API 是否正常：
+測試 API 是否正常（會回一則反問或推薦）：
 
 ```bash
-curl -s -X POST localhost:5000/recommend -H "Content-Type: application/json" \
-  -d '{"district":"大安區","category":"燒肉"}'
+curl -s -X POST localhost:5000/chat -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"大安燒肉 2人 800"}]}'
 ```
 
-### 3. 在 Open WebUI 加入 Pipe
+### 3. 在 Open WebUI 加入 Pipe（只要做一次）
 
 1. 左下角頭像 → **管理員控制台** → **函式** → **建立**
 2. 貼上 `openwebui_pipe.py` 的完整內容，填寫名稱與 ID 後儲存，並打開開關
@@ -77,34 +88,35 @@ curl -s -X POST localhost:5000/recommend -H "Content-Type: application/json" \
 
 | 設定 | 自己電腦 | 實驗室平台 |
 |---|---|---|
-| Api Url | 預設即可（`http://127.0.0.1:5000/recommend`） | `http://testbed:5000/recommend` |
-| Llm Api Key | 選填 | 實驗室 `.env` 裡的 `LLM_API_KEY` |
+| Api Url | 預設即可（`http://127.0.0.1:5000/chat`） | `http://testbed:5000/chat` |
+| Llm Api Key | 選填 | **自己的** `LLM_API_KEY`（實驗室 `.env` 裡） |
 | Llm Model | 選填 | `Qwen3.6-35B-A3B`（以管理者提供的名稱為準；留空會自動用服務上的第一個模型） |
 
 4. 新增對話，模型選這個 Pipe，輸入「大安燒肉 兩個人 預算800」測試
 
-> 注意：Pipe 是貼在 Open WebUI 裡的，`git pull` 不會自動更新。`openwebui_pipe.py` 有改動時，要重新貼一次。
+> 舊版設定的 Api Url 是 `…/recommend`，新版 pipe 會自動改用 `…/chat`，不用另外改。
 
 ### 4. 更新到最新版
 
+機器人的邏輯都在 API，**更新時不用重貼 pipe**：
+
 ```bash
 git pull
-```
-
-API 要重新啟動才會套用新程式。實驗室平台：
-
-```bash
 pkill -f api.py; nohup env HOST=0.0.0.0 python api.py > api.log 2>&1 &
 ```
+
+只有 `openwebui_pipe.py` 本身有改動時（很少發生），才需要重新貼到 Open WebUI。
 
 ## 推薦邏輯
 
 ### 需求解析
 
-- **規則解析**（預設，不需要任何金鑰）：支援行政區省略「區」、料理同義詞（麻辣鍋→火鍋、韓國菜→韓式料理）、中文數字（三個人、一千）、「1k」「一人500」「500以內」等說法
-- **LLM 解析**（在齒輪填入 LLM 金鑰後啟用）：理解更自由的句子，支援多輪對話（「再便宜一點」），並由 LLM 撰寫推薦理由。LLM 失敗時自動退回規則解析
+- **LLM 解析**（在齒輪填入 LLM 金鑰後啟用，主要的方式）：理解自由的句子、多輪對話（「再便宜一點」）、意圖（找店／換一批／不喜歡／閒聊／全新的需求），以及其他條件（附近、不要連鎖、隱藏版…）。使用伺服器的 JSON 格式功能，保證回傳的欄位正確
+- **規則解析**（備案，不需要金鑰）：地區、類別、人數、預算、第幾間、同音錯字、捷運站、預算區間、不要某類別。LLM 掛掉或漏填某個欄位時，用規則補上
 
 回答第一行會顯示解析出的條件，以及使用哪種解析方式。
+
+**新需求和修改**：推薦完之後，如果使用者重新講了完整的條件（一次講 3 項以上，或 LLM 判斷是全新的需求），之前的其他條件（附近、隱藏版、不要的類別、預算下限）不再套用，並顯示「🆕 這是新的需求…」；「不要連鎖」和不喜歡過的店會保留。只改一兩項（「換成燒肉」）則沿用其他條件。
 
 ### 資訊不足時持續反問
 
@@ -122,44 +134,42 @@ pkill -f api.py; nohup env HOST=0.0.0.0 python api.py > api.log 2>&1 &
 
 ### 子類型（壽喜燒、麻辣鍋、壽司、牛排…）
 
-資料集只有 14 個大類，「壽喜燒」「麻辣鍋」都被分在「火鍋」。說出子類型時（設定在 `openwebui_pipe.py` 的 `SUBTYPES`，約 45 種）：
+資料集只有 14 個大類，「壽喜燒」「麻辣鍋」都被分在「火鍋」。說出子類型時（設定在 `src/lexicon.py` 的 `SUBTYPES`，約 45 種）：
 
 - **店名看得出是這種的店排最前面**（從店名關鍵字判斷，例如店名有「麻辣」→ 麻辣鍋），就算比預算稍微高一點也一樣；其他同類別的店排在後面，中間有「🍽️ 以下是一般的火鍋店」分隔
 - 部分子類型會跨類別找，例如被分在「燒肉」的壽喜燒店也會被找到
-- **找不到就誠實說明**：「資料庫裡找不到大安區店名看得出是『壽喜燒』的店，以下先推薦一般的火鍋店，不一定有壽喜燒」
+- **這一區找不到**：誠實說明，並告訴使用者全台北有幾家（「想看可以說『不限地區』」）
+- **整個資料庫都沒有**（例如羊肉爐、薑母鴨）：不直接列一般的店，而是先反問要改成一般火鍋，還是資料裡有的其他子類型（附家數）
 - 限制：只看店名，店名沒寫的（例如「無老鍋」）判斷不出來；要更準確需要另外用子類型關鍵字重新採集資料
 
 ### 不喜歡／吃過、閒聊
 
 - 「我不喜歡第 2 間」「肉老大吃過了」「這些都吃過了」→ 這段對話之後都不再推薦那些店，並補上新的選擇；只說「吃過了」時會反問是哪一間
-- 有 LLM 時，「那間太遠了」這類比較口語的說法也能判斷；道謝、閒聊、問推薦過的店的細節，會由 LLM 自然回覆（只根據推薦內容回答，不編造資料）
+- 有 LLM 時，「那間太遠了」這類比較口語的說法也能判斷；道謝、閒聊、問推薦過的店的細節、「你推薦哪一間？」，會由 LLM 自然回覆（只根據推薦內容回答，不編造資料）
 - 條件行會顯示 LLM 沒用上的原因，例如「（規則解析・未設定 LLM 金鑰）」「（規則解析・連不到 LLM 服務）」，方便檢查設定
 
 ### 其他條件（附近、連鎖、隱藏版…）
 
 條件行下面的「🎛️ 其他條件：…」會被記住，下一句沿用；說「連鎖也可以」「有名的也可以」可以取消。
 
-| 說法 | 做法 |
-|---|---|
-| 「忠孝復興附近」「捷運古亭站」「西門町」「台北101」 | 用經緯度找捷運站 **800 公尺內**的店（不限行政區），不到 5 家放寬到 1.5 公里；卡片顯示距離。跟行政區同名的站（大安、中山…）要說「站」或「捷運」 |
-| 「不要連鎖店」 | 排除連鎖：同一個品牌名在資料裡有 2 家以上不同的店 |
-| 「比較沒人知道的」「隱藏版」「私房」 | 評分 4.3 以上、評論數至少 50 則、且少於同區同類型的中位數；排序不看人氣 |
-| 「預算 500 到 1000」「1000 以上」 | 預算下限：多數人花費的上限要到這個金額 |
-| 「日式或韓式都可以」 | 多個類別，結果輪流排 |
-| 「剛吃過火鍋」「火鍋以外都可以」 | 排除這個類別 |
-| 「跟第 2 間差不多的」 | 同類型、距離那家 1.5 公里內、價位相近，並排除剛剛那批 |
-| 「你決定」「給我一間就好」 | 只推薦 1 家 |
-| 推薦完問「你推薦哪一間？」 | 從剛剛那批挑一家並說明理由 |
-| 「今天好冷」「趕時間」「慶生」 | 反問類型時給建議 |
-| 「要有包廂」「停車」「營業時間」「素食」「適合約會」… | 資料沒有這些欄位：誠實說明沒辦法篩選，請看 Google Maps |
+| 說法 | 做法 | 沒有 LLM 時 |
+|---|---|---|
+| 「忠孝復興附近」「捷運古亭站」「西門町」「台北101」 | 用經緯度找捷運站 **800 公尺內**的店（不限行政區），不到 5 家放寬到 1.5 公里；卡片顯示距離。跟行政區同名的站（大安、中山…）要說「站」或「捷運」 | ✅ |
+| 「預算 500 到 1000」「1000 以上」 | 預算下限：多數人花費的上限要到這個金額 | ✅ |
+| 「日式或韓式都可以」 | 多個類別，結果輪流排 | ✅ |
+| 「剛吃過火鍋」「火鍋以外都可以」 | 排除這個類別 | ✅ |
+| 「不要連鎖店」 | 排除連鎖：同一個品牌名在資料裡有 2 家以上不同的店 | ❌ |
+| 「比較沒人知道的」「隱藏版」「私房」 | 評分 4.3 以上、評論數至少 50 則、且少於同區同類型的中位數；排序不看人氣 | ❌ |
+| 「要有包廂」「停車」「營業時間」「素食」「適合約會」… | 資料沒有這些欄位：誠實說明沒辦法篩選，請看 Google Maps | ❌ |
 
-**同音錯字**：「大按→大安」「伙鍋→火鍋」「中孝復興→忠孝復興」「少肉→燒肉」「預酸→預算」會自動修正，並在條件行下顯示「✏️ 『大按』看成『大安』」。做法是比對讀音（不管聲調），至少要有一個字完全一樣、不改「是、的」這類常用字，也不改「美食」「大致」這種本身就是常用詞的字。拼音表由 `tools/build_lookups.py` 產生、寫在 `openwebui_pipe.py` 最後面，Open WebUI 不用安裝套件。有 LLM 時也會請 LLM 依讀音判斷。
+**同音錯字**：「大按→大安」「伙鍋→火鍋」「中孝復興→忠孝復興」「少肉→燒肉」「預酸→預算」會自動修正，並在條件行下顯示「✏️ 『大按』看成『大安』」。做法是比對讀音（不管聲調），至少要有一個字完全一樣、不改「是、的」這類常用字，也不改「美食」「大致」這種本身就是常用詞的字。拼音表存在 `data/lexicon_generated.json`，虛擬機和 Open WebUI 不用安裝套件。有 LLM 時也會請 LLM 依讀音判斷。
 
-修改地區、類別、子類型、捷運站或地標清單後，重新產生拼音表：
+修改 `src/lexicon.py` 的地區、類別、子類型或地標清單後，重新產生拼音表：
 
 ```bash
 pip install pypinyin
-python tools/build_lookups.py northern-taiwan.geojson
+python tools/build_lookups.py                           # 只更新拼音表
+python tools/build_lookups.py northern-taiwan.geojson   # 連捷運站座標一起更新
 ```
 
 （車站資料：[repeat/northern-taiwan-metro-stations](https://github.com/repeat/northern-taiwan-metro-stations) 的 `output/northern-taiwan.geojson`）
@@ -194,10 +204,17 @@ python tools/build_lookups.py northern-taiwan.geojson
 ## 成效評估
 
 ```bash
-python eval/evaluate.py
+python eval/evaluate.py          # 只評估規則解析，不會呼叫 LLM
+python eval/evaluate.py --llm    # 另外評估 LLM 解析（需要環境變數 LLM_API_KEY，約 30 次呼叫）
 ```
 
-設定環境變數 `LLM_API_KEY` 後，會一併評估 LLM 解析。
+對話情境測試（改程式後用來確認行為有沒有被改壞）：
+
+```bash
+python tests/run_scenarios.py --check     # 只用規則，跟 tests/golden/rules.txt 比對
+python tests/run_scenarios.py --update    # 確認變化是預期的之後，更新比對基準
+python tests/run_scenarios.py --llm       # 用真的 LLM 跑一次（需要 LLM_API_KEY，約 100 次呼叫）
+```
 
 | 指標 | 原始版本 | 目前版本 |
 |---|---|---|
@@ -240,5 +257,6 @@ GOOGLE_MAPS_API_KEY=你的金鑰 python collector_taipei.py
 ## 安全注意事項
 
 - **不要把任何 API 金鑰寫進程式碼或 commit 到 GitHub**（本 repo 是公開的）。金鑰一律用環境變數或 Open WebUI 的齒輪設定
+- LLM 金鑰只存在 Open WebUI；`api.py` 不會拿到金鑰，也不會自己呼叫 LLM
 - 舊版程式碼曾包含一把 Google 金鑰，該金鑰已失效，請勿再使用
 - `.gitignore` 已排除 `.env`、快取檔與壓縮檔

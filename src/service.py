@@ -14,8 +14,8 @@ def handle_recommend(data: dict) -> dict:
         budget=data.get("budget"),
     )
     exclude = data.get("exclude") or []  # 已經推薦過、這次要排除的店名
-    # 其他條件：捷運站附近、類似某間、多類別、不要的類別、不要連鎖、隱藏版、預算下限
-    opts = {k: data.get(k) for k in ("near", "similar_to", "categories", "avoid_categories",
+    # 其他條件：捷運站附近、多類別、不要的類別、不要連鎖、隱藏版、預算下限
+    opts = {k: data.get(k) for k in ("near", "categories", "avoid_categories",
                                      "no_chain", "hidden_gem", "budget_min") if data.get(k)}
     top_n = data.get("top_n") or 5
     # subtype：子類型（例如「壽喜燒」），subtype_keywords：用來比對店名的關鍵字
@@ -46,9 +46,9 @@ def handle_recommend(data: dict) -> dict:
             # matched_subtype：店名看得出是這個子類型的家數（沒有指定子類型時是 None）
             "matched_subtype": results.attrs.get("matched_subtype"),
             # near / radius / radius_relaxed：附近搜尋用的車站、範圍（公尺）、是否放寬過
-            # similar：「跟某間差不多」的參考店；chain_removed：排除了幾家連鎖店
+            # chain_removed：排除了幾家連鎖店
             **{k: results.attrs[k] for k in ("near", "radius", "radius_relaxed", "radius_first",
-                                             "similar", "chain_removed") if k in results.attrs},
+                                             "chain_removed") if k in results.attrs},
             **overview}
 
 
