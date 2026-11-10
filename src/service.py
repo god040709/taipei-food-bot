@@ -16,7 +16,7 @@ def handle_recommend(data: dict) -> dict:
     exclude = data.get("exclude") or []  # 已經推薦過、這次要排除的店名
     # 其他條件：捷運站附近、多類別、不要的類別、不要連鎖、隱藏版、預算下限
     opts = {k: data.get(k) for k in ("near", "categories", "avoid_categories",
-                                     "no_chain", "hidden_gem", "budget_min") if data.get(k)}
+                                     "no_chain", "hidden_gem", "budget_min", "sort") if data.get(k)}
     top_n = data.get("top_n") or 5
     # subtype：子類型（例如「壽喜燒」），subtype_keywords：用來比對店名的關鍵字
     results, error = search_restaurants(**conditions, exclude=exclude, top_n=top_n,

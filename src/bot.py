@@ -14,7 +14,8 @@ from lexicon import (  # 詞庫、提示詞、文字處理
     CHAT_MARK, CHAT_PROMPT, CHOOSE_MARK, CN_INDEX, DISTRICTS, FIELDS, FIELD_SKIP_WORDS, LABELS,
     MORE_WORDS, MRT_STATIONS, NEG_AFTER_RE, NEG_BEFORE_RE, NUM, PARSE_PROMPT, PERSON_PREFS,
     PREFS_MARK, PREF_OFF_WORDS, QUESTIONS, REASON_PROMPT, REJECTED_MARK, REJECT_SOFT, REJECT_STRONG,
-    SAY_PROMPT, SKIP_WORDS, STYLE_WORDS, SUBTYPES, TOTAL_RE, find_near, fix_homophones, to_number,
+    SAY_PROMPT, SKIP_WORDS, SORTS, SORT_LABELS, STYLE_WORDS, SUBTYPES, TOTAL_RE, find_near,
+    fix_homophones, to_number,
 )
 from llm import LLMError
 
@@ -141,7 +142,7 @@ class Bot:
             return {"type": "array", "items": {"type": "string", **({"enum": list(enum)} if enum else {})}}
 
         props = {
-            "intent": {"type": "string", "enum": ["search", "new", "more", "reject", "chat"]},
+            "intent": {"type": "string", "enum": ["search", "new", "more", "reject", "chat", "categories"]},
             "district": nullable("string", DISTRICTS),
             "category": nullable("string", CATEGORIES),
             "party_size": nullable("integer"),
@@ -153,6 +154,7 @@ class Bot:
             "no_chain": nullable("boolean"),
             "hidden_gem": nullable("boolean"),
             "budget_min": nullable("integer"),
+            "sort": nullable("string", SORTS),
             "avoid_categories": array(CATEGORIES),
             "categories": array(CATEGORIES),
             "unsupported": array(),
@@ -200,7 +202,7 @@ class Bot:
 
         district = data.get("district") if data.get("district") in DISTRICTS else None
         category = data.get("category") if data.get("category") in CATEGORIES else None
-        intents = ("search", "new", "more", "reject", "chat")
+        intents = ("search", "new", "more", "reject", "chat", "categories")
         intent = data.get("intent") if data.get("intent") in intents else "search"
         return {"district": district, "category": category,
                 "party_size": to_int(data.get("party_size")), "budget": to_int(data.get("budget")),
@@ -223,6 +225,8 @@ class Bot:
                 p[k] = data[k]
         if to_int(data.get("budget_min")):
             p["budget_min"] = to_int(data.get("budget_min"))
+        if data.get("sort") in SORTS:
+            p["sort"] = data["sort"]
         avoid = [c for c in (data.get("avoid_categories") or []) if c in CATEGORIES]
         if avoid:
             p["avoid"] = list(dict.fromkeys(avoid))
@@ -276,6 +280,23 @@ class Bot:
                     int(party.group(1)) if party else None,
                     int(budget.group(1)) if budget else None)
         return None
+
+    @staticmethod
+    def previous_waived(messages: list) -> set:
+        """上一次推薦時「不限」的欄位（條件行寫「不限地區」「不限類別」「人數不限」「預算不限」）。
+        使用者已經回答過了，推薦完之後的追問、修改都不用再問。"""
+        for m in reversed(messages[:-1]):
+            content = m.get("content", "")
+            if m.get("role") != "assistant" or not isinstance(content, str) \
+                    or content.startswith((ASK_MARK, CHAT_MARK)):
+                continue
+            cond = re.search(r"🔎 搜尋條件：(.+?)（", content)
+            if not cond:
+                return set()
+            parts = cond.group(1).split("｜")
+            labels = {"district": "不限地區", "category": "不限類別", "party_size": "人數不限", "budget": "預算不限"}
+            return {f for f, label in labels.items() if label in parts}
+        return set()
 
     def parse_rounds(self, messages: list):
         """規則解析多輪：機器人反問後，把使用者這幾次的回答合併起來。"""
@@ -413,6 +434,8 @@ class Bot:
                     p["avoid"] = [c for c in part[3:].split("、") if c in CATEGORIES]
                 elif part.startswith("類型："):
                     p["cats"] = [c for c in part[3:].split("、") if c in CATEGORIES]
+                elif part in SORT_LABELS.values():
+                    p["sort"] = next(k for k, v in SORT_LABELS.items() if v == part)
             return p
         return {}
 
@@ -450,6 +473,8 @@ class Bot:
                 prefs[k] = False  # 「連鎖也可以」「有名的也可以」（LLM 常把沒提到的填成 false）
         if llm_prefs.get("budget_min") and not prefs.get("budget_min"):
             prefs["budget_min"] = llm_prefs["budget_min"]
+        if llm_prefs.get("sort"):
+            prefs["sort"] = llm_prefs["sort"]
         if llm_prefs.get("cats"):
             prefs["cats"] = llm_prefs["cats"]
         elif any(self.parse_user_query(t)[1] for t in texts) and \
@@ -499,6 +524,8 @@ class Bot:
             parts.append(f"每人 {prefs['budget_min']} 元以上")
         if prefs.get("avoid"):
             parts.append("不要：" + "、".join(prefs["avoid"]))
+        if prefs.get("sort"):
+            parts.append(SORT_LABELS[prefs["sort"]])
         return PREFS_MARK + "｜".join(parts) if parts else ""
 
     def get_conditions(self, messages: list):
@@ -646,14 +673,15 @@ class Bot:
 
     @staticmethod
     def answered_by_prefs(prefs: Optional[dict]) -> set:
-        """其他條件已經回答了的欄位：「忠孝復興附近」→ 地區；「不要火鍋」→ 類型；「1000 以上」→ 預算。"""
+        """其他條件已經回答了的欄位：「忠孝復興附近」→ 地區；「不要火鍋」→ 類型；
+        「1000 以上」「最便宜的」「最貴的」→ 預算（依價格排序時，預算不是重點）。"""
         prefs = prefs or {}
         done = set()
         if prefs.get("near"):
             done.add("district")
         if prefs.get("avoid") or prefs.get("cats"):
             done.add("category")
-        if prefs.get("budget_min"):
+        if prefs.get("budget_min") or prefs.get("sort"):
             done.add("budget")
         return done
 
@@ -896,19 +924,25 @@ class Bot:
     # ------------------------------------------------------------------
     # 推薦理由（每家一段，寫餐廳特色）
     # ------------------------------------------------------------------
-    def write_reasons(self, texts: list, conditions, restaurants: list, subtype=None, notes=None):
-        """回傳 (開場白, 每家的推薦理由 list)。LLM 不能用時，用資料中的事實組成理由。"""
+    def write_reasons(self, texts: list, conditions, restaurants: list, subtype=None, unsupported=None):
+        """回傳 (開場白, 每家的推薦理由 list)。LLM 不能用時，用資料中的事實組成理由。
+        unsupported：使用者提到、但資料沒有的條件（例如包廂、停車），不可以說店家符合。"""
         fallback = [("；".join(r.get("facts") or []) + "。") if r.get("facts") else ""
                     for r in restaurants]
         if not (self.valves.USE_LLM_REASON and self._llm_enabled() and restaurants):
             return None, fallback
         district, category, party_size, budget = conditions
-        need = "；".join(texts[-4:])
+        need = "；".join(fix_homophones(t)[0] for t in texts[-4:])
         cond = (f"地區={district or '不限'}，類型={category or '不限'}，"
                 f"人數={party_size or '不限'}，每人預算上限={budget or '不限'}")
         if subtype:
             cond += (f"，想吃的子類型={subtype}（subtype_match=true 代表店名看得出是{subtype}；"
                      f"false 的店不可以說它有{subtype}）")
+            if not any(r.get("subtype_match") for r in restaurants):
+                cond += f"。這批店都看不出有{subtype}，開場和理由都不可以說這些店是{subtype}"
+        if unsupported:
+            cond += (f"。使用者提到的「{'、'.join(unsupported)}」資料裡沒有，"
+                     "不知道店家有沒有，開場和理由都不可以說店家符合這些條件")
         keys = ["name", "category", "min_price", "max_price", "subtype_match", "distance",
                 "facts", "summary", "highlights", "reviews"]
         data = [{k: r.get(k) for k in keys if r.get(k) not in (None, "", [])} for r in restaurants]
@@ -1001,7 +1035,11 @@ class Bot:
         said = self.parse_prefs(user_text)  # 這一句提到的其他條件
 
         # 問「有什麼類型可以選」→ 列出料理類型
-        if self.is_category_question(user_text) and not (said.get("near") or any(info["llm_prefs"].values())):
+        if source == "LLM":
+            category_question = info["intent"] == "categories"  # 「不管是什麼類型」不會被誤判
+        else:
+            category_question = self.is_category_question(user_text) and not said.get("near")
+        if category_question:
             return self.list_categories(conditions)
 
         last_names = self.last_recommended(messages)
@@ -1034,6 +1072,8 @@ class Bot:
 
         # 資訊不足 → 繼續反問
         more_waived = info["llm_waived"] | ({"category"} if info["choose_category"] else set())
+        if not info["new_request"]:
+            more_waived |= self.previous_waived(messages)  # 推薦過時說過不限的，不再問
         missing = self.should_ask(messages, conditions, total, prefs, more_waived)
         if missing:
             return self.ask_question(messages, conditions, missing, total, subtype, prefs,
@@ -1091,6 +1131,7 @@ class Bot:
             "no_chain": bool(prefs.get("no_chain")),
             "hidden_gem": bool(prefs.get("hidden_gem")),
             "budget_min": prefs.get("budget_min"),
+            "sort": prefs.get("sort"),
         })
         try:
             # 跟以前透過 HTTP 呼叫一樣，轉成 JSON 再轉回來（數字型別、NaN 處理都一致）
@@ -1171,11 +1212,9 @@ class Bot:
                     note = ""
                 sections.append(f"🏷️ 店名看得出是「{subtype}」的有 {shown_sub} 家，排在最前面{note}；"
                                 f"後面是一般的{general}，不一定有{subtype}。")
-        # LLM 開場白：把上面的系統說明一起告訴 LLM，讓它自然地帶到
+        # LLM 開場白和推薦理由（上面的說明畫面上已經顯示，開場白不再重複）
         texts, _ = self.current_round(messages)
-        notes = [line for line in sections
-                 if line.startswith(("🚫", "🔄", "⚠️", "🏷️", "🧮", "✏️", "📏", "🏪", "🔍", "🆕", "🎲", PREFS_MARK))]
-        intro, reasons = self.write_reasons(texts, conditions, restaurants, subtype, notes)
+        intro, reasons = self.write_reasons(texts, conditions, restaurants, subtype, prefs.get("unsupported"))
         if intro:
             sections.append(f"💬 {intro}")
         blocks = []

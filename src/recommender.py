@@ -164,7 +164,8 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
         near：捷運站名，找附近的店（不限行政區）
         categories：多個類別（「日式或韓式都可以」）
         avoid_categories：不要的類別（「剛吃過拉麵」）
-        no_chain：不要連鎖店；hidden_gem：隱藏版；budget_min：每人預算下限"""
+        no_chain：不要連鎖店；hidden_gem：隱藏版；budget_min：每人預算下限
+        sort：price_high（最貴的在前）、price_low（最便宜的在前），同價位再看推薦指數"""
     if not os.path.exists(DF_PATH):
         return None, f"❌ 找不到資料庫檔案：{DF_PATH}，請確認是否已執行採集腳本。"
 
@@ -264,10 +265,16 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     df["_sub_order"] = (~df["subtype_match"]).astype(int)
     # 附近搜尋放寬範圍時：原本範圍內（例如 800 公尺）的店排在前面
     df["_far"] = (df["distance"] > steps[0]).astype(int) if center else 0
-    df = df.sort_values(by=["_sub_order", "_over", "_far", "_fit_order", "_over_order", "score"],
-                        ascending=[True, True, True, True, True, False])
+    if opts.get("sort") in ("price_high", "price_low"):
+        # 依價格排序：用多數人花費區間的中間值；預算放寬才補上的店照樣排在後面
+        df["_price"] = (df["min_price"] + df["max_price"]) / 2
+        df = df.sort_values(by=["_sub_order", "_over", "_far", "_price", "score"],
+                            ascending=[True, True, True, opts["sort"] == "price_low", False])
+    else:
+        df = df.sort_values(by=["_sub_order", "_over", "_far", "_fit_order", "_over_order", "score"],
+                            ascending=[True, True, True, True, True, False])
     cats = opts.get("categories") or []
-    if len(cats) >= 2:
+    if len(cats) >= 2 and not opts.get("sort"):
         # 多個類別（「日式或韓式都可以」）：各類別輪流排，不會整批都是同一種
         df["_cat_rank"] = df.groupby("category").cumcount()
         df = df.sort_values(by=["_sub_order", "_over", "_cat_rank"], kind="mergesort")

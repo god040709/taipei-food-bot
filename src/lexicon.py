@@ -83,7 +83,9 @@ PARSE_PROMPT = f"""你是台北餐廳推薦系統的「搜尋條件抽取器」�
   more＝要換一批、推薦別的；
   reject＝不喜歡、吃過、不想去推薦過的某幾間店；
   chat＝問你會做什麼、打招呼、道謝、閒聊、問推薦過的店的細節、請你從推薦過的店裡挑一間，
-       或是跟找餐廳無關的話。
+       或是跟找餐廳無關的話；
+  categories＝問有哪些料理類型可以選（例如「有什麼類型」「有哪些料理」）。
+       說「不管什麼類型」「什麼類型都可以」是類型不限，不是 categories。
 - district、category、party_size（人數）、budget（每人預算上限，台幣）：目前要用的條件。
   沒有改動的就沿用之前的；從來沒提過、或使用者說不限，就填 null。
 - waived：使用者「明確說」不限、不在意、都可以的欄位名稱（district / category / party_size / budget）。
@@ -97,6 +99,7 @@ PARSE_PROMPT = f"""你是台北餐廳推薦系統的「搜尋條件抽取器」�
   no_chain：true＝不要連鎖店；false＝說了連鎖也可以。
   hidden_gem：true＝想要比較少人知道、隱藏版、私房的店；false＝說了有名的也可以。
   budget_min：每人預算下限。
+  sort：price_high＝想要最貴、最高級的；price_low＝想要最便宜的；沒提到就填 null。
   avoid_categories：明確說不想吃、剛吃過、要排除的類別。使用者說想吃的類別絕對不能放這裡。
   categories：同時接受好幾種類別時，全部列出。
   unsupported：使用者在意、但只靠店名和價格判斷不了的條件（營業時間、停車、包廂、寵物、素食、氣氛等），用簡短的詞。
@@ -164,6 +167,10 @@ ASK_HINT_WORDS = {
     "party_size": ["幾個人", "幾位", "幾人", "人數", "多少人"],
     "budget": ["預算", "元", "價位", "花費", "多少錢", "價錢", "價格"],
 }
+
+# 依價格排序（「最貴的」「最便宜的」）
+SORTS = ["price_high", "price_low"]
+SORT_LABELS = {"price_high": "依價格由高到低", "price_low": "依價格由低到高"}
 
 # 使用者請機器人挑料理類型：反問時會加上這一行（下一句讀回來，就不會再問類型）
 CHOOSE_MARK = "🎲 料理類型交給我挑"
