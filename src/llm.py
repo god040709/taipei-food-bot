@@ -28,11 +28,12 @@ class LLMError(Exception):
         self.note = note
 
 
-def build_request(messages: list, max_tokens: int, schema: Optional[dict] = None) -> dict:
+def build_request(messages: list, max_tokens: int, schema: Optional[dict] = None,
+                  temperature: float = 0) -> dict:
     """OpenAI 相容的 /chat/completions 內容（不含 model，由呼叫的一方填）。"""
     request = {
         "messages": messages,
-        "temperature": 0,
+        "temperature": temperature,  # 解析條件用 0（穩定），閒聊稍微調高（措辭有變化）
         "max_tokens": max_tokens,
         # Qwen3 系列：關閉思考模式，回應更快（不支援的伺服器會忽略）
         "chat_template_kwargs": {"enable_thinking": False},
@@ -64,7 +65,8 @@ class ReplayLLM:
         self.results = list(results or [])
         self.used = 0
 
-    def chat(self, messages: list, max_tokens: int = 400, schema: Optional[dict] = None) -> str:
+    def chat(self, messages: list, max_tokens: int = 400, schema: Optional[dict] = None,
+             temperature: float = 0) -> str:
         if not self.enabled:
             raise LLMError("未設定 LLM 金鑰")
         if self.used < len(self.results):
@@ -73,14 +75,15 @@ class ReplayLLM:
             if not result.get("ok"):
                 raise LLMError(result.get("note") or "LLM 沒有回應")
             return clean_text(result.get("content"), result.get("finish_reason"))
-        raise NeedLLM(build_request(messages, max_tokens, schema))
+        raise NeedLLM(build_request(messages, max_tokens, schema, temperature))
 
 
 class NoLLM:
     """不用 LLM（只用規則）。本機測試用。"""
     enabled = False
 
-    def chat(self, messages: list, max_tokens: int = 400, schema: Optional[dict] = None) -> str:
+    def chat(self, messages: list, max_tokens: int = 400, schema: Optional[dict] = None,
+             temperature: float = 0) -> str:
         raise LLMError("未設定 LLM 金鑰")
 
 
@@ -97,7 +100,8 @@ class DirectLLM:
         self.pause = pause
         self.calls = 0
 
-    def chat(self, messages: list, max_tokens: int = 400, schema: Optional[dict] = None) -> str:
+    def chat(self, messages: list, max_tokens: int = 400, schema: Optional[dict] = None,
+             temperature: float = 0) -> str:
         import requests
 
         if not self.enabled:
@@ -106,7 +110,7 @@ class DirectLLM:
             raise LLMError("超過本次測試的呼叫上限")
         self.calls += 1
         time.sleep(self.pause)
-        request = build_request(messages, max_tokens, schema)
+        request = build_request(messages, max_tokens, schema, temperature)
         request["model"] = self.model
         try:
             r = requests.post(f"{self.base_url}/chat/completions", json=request, timeout=90,

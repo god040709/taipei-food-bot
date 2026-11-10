@@ -45,8 +45,9 @@ class Bot:
     def _llm_enabled(self) -> bool:
         return bool(getattr(self.llm, "enabled", False))
 
-    def _chat(self, messages: list, max_tokens: int = 400, schema: Optional[dict] = None) -> str:
-        return self.llm.chat(messages, max_tokens, schema)
+    def _chat(self, messages: list, max_tokens: int = 400, schema: Optional[dict] = None,
+              temperature: float = 0) -> str:
+        return self.llm.chat(messages, max_tokens, schema, temperature)
 
     @staticmethod
     def _extract_json(raw: str) -> dict:
@@ -818,9 +819,11 @@ class Bot:
                 break
         history = [{"role": m["role"], "content": str(m.get("content", ""))[:500]}
                    for m in messages[-6:] if m.get("role") in ("user", "assistant")]
+        system = (CHAT_PROMPT + "\n可以推薦的料理類型：" + "、".join(CATEGORIES)
+                  + "\n最近的推薦內容：\n" + (recent or "（還沒有推薦過餐廳）"))
         try:
-            return self._chat([{"role": "system", "content": CHAT_PROMPT + "\n最近的推薦內容：\n" + recent}]
-                              + history, max_tokens=300)
+            return self._chat([{"role": "system", "content": system}] + history,
+                              max_tokens=300, temperature=0.7)
         except Exception:
             return None
 
@@ -932,13 +935,13 @@ class Bot:
         said = self.parse_prefs(user_text)  # 這一句提到的其他條件
 
         # 問「有什麼類型可以選」→ 列出料理類型
-        if self.is_category_question(user_text) and not (said.get("near") or info["llm_prefs"]):
+        if self.is_category_question(user_text) and not (said.get("near") or any(info["llm_prefs"].values())):
             return self.list_categories(conditions)
 
         last_names = self.last_recommended(messages)
         new_search = bool(any(self.parse_user_query(user_text))
                           or self.detect_subtype(fix_homophones(user_text)[0], None)
-                          or said or info["llm_prefs"])
+                          or said or any(info["llm_prefs"].values()))  # LLM 常把沒提到的填 false，不算
 
         # 「不喜歡第 2 間」「吃過了」→ 找出是哪幾間
         prev_msg = str(messages[-2].get("content", "")) if len(messages) >= 2 else ""
@@ -954,8 +957,9 @@ class Bot:
             else:
                 return self.ask_which(last_names)
 
-        # 不是要新推薦（道謝、閒聊、問細節）→ LLM 自然回覆
-        if info["intent"] == "chat" and not rejects and not self.wants_more(user_text) and last_names:
+        # 不是要新推薦（問你會做什麼、道謝、閒聊、問細節）→ LLM 自然回覆。
+        # 這句話有提到任何條件就當成找餐廳，避免把需求誤判成閒聊
+        if info["intent"] == "chat" and not rejects and not self.wants_more(user_text) and not new_search:
             reply = self.chat_reply(messages)
             if reply:
                 return CHAT_MARK + reply
