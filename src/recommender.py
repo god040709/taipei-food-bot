@@ -377,6 +377,40 @@ def relaxations_for(district=None, category=None, party_size=None, budget=None, 
         return []
 
 
+def subtype_overview(category, keywords, cross=False, siblings=None, district=None, party_size=None,
+                     budget=None, opts=None):
+    """子類型的店家數，讓機器人誠實說明「有沒有這種店」：
+    total：整個資料庫裡店名看得出是這種的家數（不限地區、預算）
+    general：目前條件下，同類別的店有幾家
+    siblings：目前條件下，同類別的其他子類型各有幾家（只列有店的，家數多的在前）：[[子類型, 家數], ...]
+    siblings 的格式：{子類型: [店名關鍵字, 是否跨類別]}"""
+    df = load_data()
+
+    def subtype_mask(d, kw, cr):
+        in_cat = d["category"].str.contains(category, regex=False, na=False) if category else True
+        return name_matches(d, kw) & (True if cr else in_cat)
+
+    total = int(subtype_mask(df, keywords, cross).sum()) if keywords else 0
+    opts = dict(opts or {})
+    if opts.get("near"):
+        point = load_stations().get(opts["near"])
+        if point:
+            df = df.copy()
+            df["distance"] = distance_m(df, *point)
+            opts["radius"] = NEAR_STEPS[-1]
+            district = None
+    here = apply_filters(df, district, None, party_size, budget, opts={**opts, "categories": None})
+    general = int(here["category"].str.contains(category, regex=False, na=False).sum()) if category else len(here)
+    counts = {}
+    for name, (kw, cr) in (siblings or {}).items():
+        n = int(subtype_mask(here, kw, cr).sum())
+        if n:
+            counts[name] = n
+    # 用 list 回傳：JSON 物件的順序可能被重排（Flask 會照字母排序 key）
+    return {"total": total, "general": general,
+            "siblings": sorted(([name, n] for name, n in counts.items()), key=lambda x: -x[1])}
+
+
 def category_counts(district=None, party_size=None, budget=None):
     """各料理類型有幾家店（使用者問「有什麼類型可以選」時用）。"""
     df = apply_filters(load_data(), district, None, party_size, budget)

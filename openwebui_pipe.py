@@ -105,16 +105,17 @@ JSON 格式：
    「伙鍋」=火鍋、「少肉」=燒肉、「拉免」=拉麵、「中孝復興」=忠孝復興、「預酸」=預算。
 9. 預算給的是區間（「500 到 1000」）時，budget 填上限 1000；「1000 以上」時 budget 填 null。
 10. extra 只看「使用者最後一句話」有沒有提到以下條件，沒提到的欄位就不要放：
-   - "near"：捷運站或地標（例如「忠孝復興」「台北101」「西門町」），使用者想在那附近吃。
+   - "near"：使用者說的捷運站或地標名稱（照原話），使用者想在那附近吃。
    - "no_chain"：true = 不要連鎖店；false = 說了連鎖也可以。
    - "hidden_gem"：true = 想要比較少人知道、隱藏版、私房的店；false = 說了有名的也可以。
    - "budget_min"：每人預算下限（「500 到 1000」的 500、「1000 以上」的 1000）。
-   - "avoid_categories"：不想吃的類別（「剛吃過拉麵」「火鍋以外都可以」），只能用上面 category 的名稱。
-   - "categories"：同時可以接受好幾種類別時（「日式或韓式都可以」），列出全部，只能用 category 的名稱。
+   - "avoid_categories"：使用者明確說不想吃、剛吃過、要排除的類別，只能用上面 category 的名稱。
+     使用者說「想吃」某種東西時，那個類別絕對不能放進這裡。
+   - "categories"：使用者同時接受好幾種類別時，列出全部，只能用 category 的名稱。
    - "pick_one"：true = 使用者要你直接決定、只要一間。
    - "unsupported"：使用者在意、但只靠名稱和價格判斷不了的條件，例如營業時間、停車、包廂、
      寵物、素食、安靜、適合約會，用簡短的詞列出。
-   格式例如 "extra": {{"near": "忠孝復興", "no_chain": true}}；都沒提到就填 {{}}。
+   extra 是一個 JSON 物件，只放使用者最後一句話真的提到的欄位；都沒提到就填 {{}}。
 """
 
 REASON_PROMPT = """你是台北餐廳推薦助理。根據使用者的需求和每家餐廳的資料，為每一家寫推薦理由。
@@ -123,10 +124,11 @@ REASON_PROMPT = """你是台北餐廳推薦助理。根據使用者的需求和�
 - min_price ~ max_price 是「多數人用餐的每人花費區間」，不是最低消費或最高消費，提到價格時請這樣理解。
 - 只能根據資料裡的內容：名稱、類別、價格、facts（客觀事實）、summary（店家簡介）、
   highlights（服務特色）、reviews（顧客評論摘錄）。資料沒有的菜色、裝潢、營業時間不可以編造。
-- reviews 裡顧客常提到的招牌菜、湯頭、服務、氣氛，可以用「評論常提到…」的方式引用。
+- 只有 reviews 有內容時才可以提到顧客評論；reviews 是空的就不要提評論。
 - 不要寫推薦指數、分數或計算方式。不要每家都用一樣的句型開頭。
 - 預算超出的部分（budget_fit 是 "partial" 或 "over"）系統會另外顯示原因，推薦理由裡不用再提。
-- intro 是一兩句自然的開場，要回應使用者最新的那句話（例如「了解，幫你避開吃過的那家」）；
+- intro 是一兩句自然的開場，回應使用者最新的那句話實際說了什麼；
+  只能提到「系統說明」和使用者真的說過的事，沒發生的事（例如使用者沒說吃過哪家）不可以提。
   如果有「系統說明」（排除了店家、預算放寬、找不到某種子類型），用自然的口吻帶到。
 - 只輸出 JSON，不要其他文字，格式：
   {"intro": "開場", "reasons": ["第 1 家的理由", "第 2 家的理由", ...]}
@@ -305,8 +307,8 @@ UNSUPPORTED = {
 }
 # 天氣、心情 → 反問類型時給建議
 MOOD_HINTS = [
-    (r"天氣冷|好冷|很冷|變冷|寒流|下雨|暖身|想吃熱的|熱呼呼|熱湯", "天氣冷的話，火鍋、拉麵、薑母鴨、羊肉爐都很適合"),
-    (r"好熱|很熱|太熱|熱死|清爽|消暑|冰的", "天氣熱的話，甜點（冰品、豆花）或日式料理比較清爽"),
+    (r"天氣冷|好冷|很冷|變冷|寒流|下雨|暖身|想吃熱的|熱呼呼|熱湯", "天氣冷的話，火鍋（麻辣鍋、石頭火鍋、涮涮鍋）或拉麵都很適合"),
+    (r"好熱|很熱|太熱|熱死|清爽|消暑|冰的", "天氣熱的話，甜點或日式料理比較清爽"),
     (r"趕時間|很急|快一點|半小時|沒什麼時間|速戰速決", "趕時間的話，平價小吃、拉麵、早午餐出餐比較快"),
     (r"慶生|生日|紀念日|請客|約會|求婚|宴客", "慶祝或請客的話，可以考慮燒肉、日式料理、義式料理，記得先訂位"),
     (r"喝一杯|喝酒|小酌|續攤", "想喝一杯的話可以選酒吧，或居酒屋（日式料理）"),
@@ -353,7 +355,7 @@ def _homophone_tables():
                 terms.append((term, tuple(reading.split())))
             elif all(ch in char_readings for ch in term):
                 terms.append((term, tuple(sorted(char_readings[ch])[0] for ch in term)))
-        terms.sort(key=lambda t: -len(t[0]))
+        terms.sort(key=lambda t: (-len(t[0]), t[0]))  # 長的詞先比對；同長度依字排，結果固定
         _HOMOPHONE_CACHE.update(chars=char_readings, terms=terms)
     return _HOMOPHONE_CACHE["chars"], _HOMOPHONE_CACHE["terms"]
 
@@ -991,11 +993,15 @@ class Pipe:
         # 子類型（例如「壽喜燒」）：這次需求有提到就用；沒提到就沿用上一次的（類別沒換的話）
         district, category, party_size, budget = conditions
         subtype = None
+        said_category = False  # 較新的一句已經明確說了類別、沒說子類型（例如回答「一般火鍋」）
         for text in reversed(fixed_texts):
             subtype = self.detect_subtype(text, category)
             if subtype:
                 break
-        if subtype is None:
+            if any(not neg for _, _, neg in self.category_mentions(text)):
+                said_category = True
+                break
+        if subtype is None and not said_category:
             prev = self.previous_subtype(messages)
             if prev and SUBTYPES[prev][0] == category:
                 subtype = prev
@@ -1406,6 +1412,10 @@ class Pipe:
         if missing:
             return self.ask_question(messages, conditions, missing, total, subtype, prefs)
 
+        asked_none = re.match(rf"{ASK_MARK}資料庫裡沒有店名看得出是「(.+?)」", prev_msg)
+        if asked_none and subtype == asked_none.group(1):
+            subtype = None  # 使用者回「都可以」之類的 → 直接推薦一般的店
+
         # 「推薦別的」→ 排除同樣條件下已經推薦過的店
         condition_line = self.describe_conditions(district, category, party_size, budget, source, subtype,
                                                   info["llm_note"], prefs)
@@ -1436,8 +1446,11 @@ class Pipe:
             "exclude": exclude,
         }
         if subtype:
-            _, _, keywords, cross = SUBTYPES[subtype]
-            payload.update({"subtype": subtype, "subtype_keywords": keywords, "subtype_cross": cross})
+            parent, _, keywords, cross = SUBTYPES[subtype]
+            siblings = {name: [kw, cr] for name, (par, _, kw, cr) in SUBTYPES.items()
+                        if par == parent and name != subtype}
+            payload.update({"subtype": subtype, "subtype_keywords": keywords, "subtype_cross": cross,
+                            "subtype_siblings": siblings})
         payload.update({
             "near": prefs.get("near"),
             "similar_to": prefs.get("similar"),
@@ -1458,6 +1471,9 @@ class Pipe:
 
         restaurants = data.get("restaurants", [])
         where = self.near_text(prefs) if prefs.get("near") else district
+        overview = data.get("subtype_overview") or {}
+        if subtype and overview.get("total") == 0:
+            return self.ask_no_subtype(subtype, category, where, overview)
         tips = self.describe_alternatives(conditions, len(restaurants), data.get("alternatives") or [], where)
         if data.get("similar"):
             # 「跟某間差不多」：顯示那家店的類別（下一句「推薦別的」會沿用）
@@ -1517,7 +1533,9 @@ class Pipe:
                 sections.append(f"⚠️ 店名看得出是「{subtype}」的店都推薦過了，"
                                 f"以下是一般的{general}，不一定有{subtype}。")
             elif shown_sub == 0:
-                sections.append(f"⚠️ 資料庫裡找不到{where}店名看得出是「{subtype}」的店，"
+                elsewhere = (f"（全台北有 {overview['total']} 家，想看可以說「不限地區」）"
+                             if overview.get("total") else "")
+                sections.append(f"⚠️ 資料庫裡找不到{where}店名看得出是「{subtype}」的店{elsewhere}，"
                                 f"以下先推薦一般的{general}，不一定有{subtype}。")
             elif shown_sub < len(restaurants):
                 over_sub = sum(1 for r in restaurants if r.get("subtype_match") and r.get("budget_fit") == "over")
@@ -1558,6 +1576,19 @@ class Pipe:
         if tips:
             sections.append(tips)
         return "\n\n".join(sections)
+
+    def ask_no_subtype(self, subtype: str, category, where, overview: dict) -> str:
+        """整個資料庫都沒有這種子類型的店 → 先問使用者要改成什麼，不直接列一般的店。"""
+        general = self.shop_label(category)
+        place = where or "台北"
+        lines = [f"{ASK_MARK}資料庫裡沒有店名看得出是「{subtype}」的店（整個台北都找不到），"
+                 f"沒辦法確定哪家有{subtype}。要改成下面哪一種？", ""]
+        if overview.get("general"):
+            lines.append(f"- 「一般{general}」→ {place}有 {overview['general']} 家符合")
+        for name, n in (overview.get("siblings") or [])[:4]:
+            lines.append(f"- 「{name}」→ {place}有 {n} 家")
+        lines += ["", "直接回覆上面「」裡的說法就可以；想換別的類型也可以直接說。"]
+        return "\n".join(lines)
 
     @staticmethod
     def shop_label(category: Optional[str]) -> str:

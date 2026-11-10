@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 from src.recommender import (  # noqa: E402
-    category_counts, format_results, relaxations_for, search_restaurants, to_records,
+    category_counts, format_results, relaxations_for, search_restaurants, subtype_overview, to_records,
 )
 
 HOST = os.environ.get("HOST", "127.0.0.1")
@@ -38,9 +38,16 @@ def handle_recommend(data: dict) -> dict:
                                         subtype_keywords=data.get("subtype_keywords") or [],
                                         subtype_cross=bool(data.get("subtype_cross")),
                                         opts=opts)
+    # 子類型的店家數：整個資料庫有沒有這種店、同類別其他子類型各有幾家（讓機器人誠實說明）
+    overview = {}
+    if data.get("subtype"):
+        overview = {"subtype_overview": subtype_overview(
+            conditions["category"], data.get("subtype_keywords") or [], bool(data.get("subtype_cross")),
+            data.get("subtype_siblings") or {}, conditions["district"], conditions["party_size"],
+            conditions["budget"], opts)}
     if error:
         return {"result": error, "restaurants": [], "matched": 0,
-                "alternatives": relaxations_for(**conditions, exclude=exclude, opts=opts)}
+                "alternatives": relaxations_for(**conditions, exclude=exclude, opts=opts), **overview}
     # result：顯示用文字；restaurants：結構化資料，給 LLM 寫推薦理由
     # matched：符合條件的餐廳總數；matched_within：價格完全在預算內的家數
     # alternatives：結果太少時，放寬條件的建議
@@ -55,7 +62,8 @@ def handle_recommend(data: dict) -> dict:
             # near / radius / radius_relaxed：附近搜尋用的車站、範圍（公尺）、是否放寬過
             # similar：「跟某間差不多」的參考店；chain_removed：排除了幾家連鎖店
             **{k: results.attrs[k] for k in ("near", "radius", "radius_relaxed", "radius_first",
-                                             "similar", "chain_removed") if k in results.attrs}}
+                                             "similar", "chain_removed") if k in results.attrs},
+            **overview}
 
 
 def handle_categories(data: dict) -> dict:
