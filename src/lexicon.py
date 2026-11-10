@@ -451,3 +451,15 @@ def find_near(text: str):
             elif explicit or near_word or len(key) >= 3 or after[:1] not in ("路", "街", "國", "里"):
                 return station, key  # 「公館吃火鍋」：2 個字的站名單獨出現也算（「公館路」不算）
     return None
+
+
+def strip_marks(text: str) -> str:
+    """去掉 LLM 模仿對話紀錄而加在開頭的符號（💬 🤔），避免越疊越多。"""
+    return re.sub(r"^(?:\s*(?:💬|🤔)\s*)+", "", text or "").strip()
+
+
+def as_list(value) -> list:
+    """LLM 該回清單的欄位，有時會回一個字串（「停車」）：當成只有一項，不要拆成一個一個字。"""
+    if isinstance(value, list):
+        return value
+    return [value] if isinstance(value, str) and value.strip() else []

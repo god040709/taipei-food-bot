@@ -12,7 +12,11 @@ openwebui_pipe.py      只負責轉送（約 130 行，貼一次就不用再改�
         │                                 │ pipe 用 Open WebUI 裡設定的金鑰去問，再把答案送回 API
 api.py                 機器人 API（預設 port 5000）
         │
-src/bot.py             對話流程：理解需求 → 反問／排除／換一批 → 查餐廳 → 組合回覆
+src/bot.py             主流程：理解需求 → 反問／排除／換一批 → 查餐廳 → 組合回覆
+  ├ understand.py      理解：LLM 解析、規則補漏與保險、意圖
+  ├ memory.py          記憶：從之前的回覆讀回條件、推薦過／不喜歡的店
+  ├ dialogue.py        對話：反問、閒聊、幫你挑類型
+  └ render.py          排版：條件行、開場白與推薦理由、卡片、除錯資訊
 src/lexicon.py         詞庫與提示詞（地區、類別、子類型、地標、同音錯字）
 src/recommender.py     篩選 → 計算推薦指數 → 取前 5 名
         │
@@ -29,7 +33,11 @@ collector_taipei.py    從 Google Places API (New) 採集資料
 |---|---|
 | `openwebui_pipe.py` | Open WebUI 的 Pipe 函式：把對話轉給 API，API 需要 LLM 時代問 |
 | `api.py` | 機器人 API（`/chat`），用 Flask |
-| `src/bot.py` | 對話流程：理解需求、反問、不喜歡／換一批、組合回覆 |
+| `src/bot.py` | 機器人本體：設定、LLM 呼叫、主流程（決定這一句要做什麼） |
+| `src/understand.py` | 理解：把使用者的話變成條件（LLM 解析為主、規則補漏與保險）、意圖判斷 |
+| `src/memory.py` | 記憶：從之前的回覆讀回狀態（上次的條件、推薦過／不喜歡的店、反問過什麼） |
+| `src/dialogue.py` | 對話：反問、閒聊、各種「問使用者」的回覆、幫使用者挑料理類型 |
+| `src/render.py` | 排版：條件行、開場白與推薦理由、餐廳卡片、說明、除錯資訊 |
 | `src/lexicon.py` | 詞庫、提示詞、同音錯字與捷運站的判斷 |
 | `src/llm.py` | 呼叫 LLM 的方式（API 用的「請 pipe 代問」、本機測試用的直接呼叫） |
 | `src/service.py` | 查餐廳、算各料理類型的家數（給機器人用） |
