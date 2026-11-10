@@ -14,7 +14,7 @@ from lexicon import (  # 詞庫、提示詞、文字處理
     ASK_HINT_WORDS, ASK_MARK, BUDGET_FILLER, BUDGET_UP_WORDS, CATEGORIES, CATEGORY_QUESTION_RE, CATEGORY_SYNONYMS,
     CHAT_MARK, CHAT_PROMPT, CHOOSE_MARK, CN_INDEX, DEBUG_MARK, DISTRICTS, FIELDS, FIELD_SKIP_WORDS, LABELS,
     MORE_WORDS, MRT_STATIONS, NEAR_ASK_MARK, NEG_AFTER_RE, NEW_REQUEST_MARK, NEG_BEFORE_RE, NUM, PARSE_PROMPT, PERSON_PREFS,
-    PREFS_MARK, PREF_OFF_WORDS, QUESTIONS, REASON_PROMPT, REJECTED_MARK, REJECT_SOFT, REJECT_STRONG,
+    PREF_OFF_WORDS, QUESTIONS, REASON_PROMPT, REJECTED_MARK, REJECT_SOFT, REJECT_STRONG,
     RELAXES, RELAX_LABELS, RESET_MARK, RESET_WORDS, SAY_PROMPT, SKIP_WORDS, SORTS, SORT_LABELS, STYLE_WORDS, SUBTYPES,
     TOTAL_RE, UNSURE_WORDS, find_near, fix_homophones, to_number,
 )
@@ -200,10 +200,9 @@ class Bot:
             else:
                 # 推薦結果只留先前的條件，其餘省略
                 cond = re.search(r"🔎 搜尋條件：([^（\n]+)", content)
-                extra = next((l[len(PREFS_MARK):] for l in content.splitlines() if l.startswith(PREFS_MARK)), "")
                 picked = "；料理類型是你幫使用者挑的" if "🎲 幫你挑了" in content else ""
                 lines.append(f"助理：（推薦了餐廳；當時的條件是 {cond.group(1).strip() if cond else '未知'}"
-                             f"{'；其他條件：' + extra if extra else ''}{picked}）")
+                             f"{picked}）")
 
         system = PARSE_PROMPT
         if recent_names:
@@ -437,7 +436,7 @@ class Bot:
 
     @staticmethod
     def previous_prefs(messages: list) -> dict:
-        """上一次推薦用的其他條件（從條件行和「🎛️ 其他條件：…」讀回來）。"""
+        """上一次推薦用的其他條件（從「🔎 搜尋條件」那一行後面的「不要連鎖｜隱藏版｜…」讀回來）。"""
         for m in reversed(messages[:-1]):
             content = m.get("content", "")
             if m.get("role") != "assistant" or not isinstance(content, str) \
@@ -451,8 +450,7 @@ class Bot:
             if near and near.group(1) in MRT_STATIONS:
                 label = re.search(r"([^｜]+?)・捷運", cond.group(1))
                 p["near"], p["near_label"] = near.group(1), (label.group(1) if label else near.group(1))
-            line = next((l for l in content.splitlines() if l.startswith(PREFS_MARK)), "")
-            for part in line[len(PREFS_MARK):].split("｜") if line else []:
+            for part in cond.group(1).split("｜"):
                 if part == "不要連鎖":
                     p["no_chain"] = True
                 elif part.startswith("隱藏版"):
@@ -546,15 +544,15 @@ class Bot:
         return sum(bool(x) for x in (where, what, party_size, budget)) >= 3
 
     @staticmethod
-    def prefs_line(prefs: dict) -> str:
-        """「🎛️ 其他條件：不要連鎖｜隱藏版｜…」（下一句會讀回來沿用）。"""
+    def prefs_text(prefs: dict) -> str:
+        """其他條件「不要連鎖｜隱藏版｜…」（接在 🔎 搜尋條件那一行後面，下一句會讀回來沿用）。"""
         parts = []
         if prefs.get("cats"):
             parts.append("類型：" + "、".join(prefs["cats"]))
         if prefs.get("no_chain"):
             parts.append("不要連鎖")
         if prefs.get("hidden_gem"):
-            parts.append("隱藏版（評分高、評論數較少）")
+            parts.append("隱藏版")
         if prefs.get("budget_min"):
             parts.append(f"每人 {prefs['budget_min']} 元以上")
         if prefs.get("avoid"):
@@ -562,7 +560,7 @@ class Bot:
         if prefs.get("sort"):
             parts.append(SORT_LABELS[prefs["sort"]])
         parts += [RELAX_LABELS[r] for r in prefs.get("relax", [])]
-        return PREFS_MARK + "｜".join(parts) if parts else ""
+        return "｜".join(parts)
 
     def get_conditions(self, messages: list):
         """回傳 (條件 tuple, 解析方式, info)。
@@ -682,7 +680,7 @@ class Bot:
         prefs = self.merge_prefs(messages, texts, info["llm_prefs"], new_request)
         if new_request:
             old = {k: v for k, v in self.previous_prefs(messages).items() if k not in PERSON_PREFS}
-            info["dropped_prefs"] = self.prefs_line(old)[len(PREFS_MARK):].replace("｜", "、")
+            info["dropped_prefs"] = self.prefs_text(old).replace("｜", "、")
         if prefs.get("budget_max"):
             budget = prefs["budget_max"]  # 「500 到 1000」→ 上限 1000
         if prefs.get("budget_min") and budget and budget <= prefs["budget_min"]:
@@ -794,7 +792,7 @@ class Bot:
             elif field in waived:
                 known.append(f"{LABELS[field]}不限")
 
-        extra = self.prefs_line(prefs)[len(PREFS_MARK):]
+        extra = self.prefs_text(prefs)
         if self._llm_enabled():
             asked = [{"district": "地區（台北 12 區都可以，也可以說捷運站附近）", "category": "想吃的料理類型",
                       "party_size": "人數", "budget": "每人預算"}[f] for f in missing]
@@ -884,17 +882,16 @@ class Bot:
         return any(w in text for w in MORE_WORDS)
 
     @staticmethod
-    def shown_restaurants(messages: list, condition_line: str, extra_line: str = "") -> list:
+    def shown_restaurants(messages: list, condition_line: str) -> list:
         """同一組搜尋條件（含其他條件）下，之前已經推薦過的店名。"""
         names = []
+        current = condition_line.split("（")[0]
         for m in messages[:-1]:
             content = m.get("content", "")
             if m.get("role") != "assistant" or not isinstance(content, str):
                 continue
-            if condition_line.split("（")[0] not in content:
-                continue
-            old_extra = next((l for l in content.splitlines() if l.startswith(PREFS_MARK)), "")
-            if old_extra != extra_line:
+            old = re.search(r"🔎 搜尋條件：[^（\n]*", content)
+            if not old or old.group(0) != current:
                 continue
             names += re.findall(r"^\*\*\d+\. (.+?)\*\*$", content, flags=re.MULTILINE)
         return list(dict.fromkeys(names))  # 同一家可能出現在好幾次回覆裡，只算一次
@@ -1088,7 +1085,7 @@ class Bot:
             (f"{category}・{subtype}" if subtype else category) if category else "不限類別",
             f"{party_size} 人" if party_size else "人數不限",
             f"每人 {budget} 元內" if budget else "預算不限",
-        ]
+        ] + ([cls.prefs_text(prefs)] if cls.prefs_text(prefs) else [])
         return f"🔎 搜尋條件：{'｜'.join(parts)}（{source}解析{'・' + note if note else ''}）"
 
     @staticmethod
@@ -1098,16 +1095,16 @@ class Bot:
         text = f"多數人花費 ${high} 以下 / 人" if low <= 1 else f"多數人花費 ${low} - ${high} / 人"
         if r.get("budget_fit") == "partial":
             text += "（⚠️ 可能超出預算）"
+        elif r.get("budget_fit") == "over":
+            text += "（⚠️ 超出預算）"
         return text
 
-    def format_card(self, i: int, r: dict, reason: str, anchor: str = "") -> str:
+    def format_card(self, i: int, r: dict, reason: str) -> str:
         lines = [
             f"**{i}. {r['name']}**",
             f"📍 {r['district']}・{r['category']}｜⭐ {r['rating']}"
             f"（{int(r['user_ratings_total'] or 0):,} 則評論）｜💰 {self.price_text(r)}",
         ]
-        if anchor and r.get("distance") is not None:
-            lines[1] += f"｜🚶 離{anchor}約 {int(r['distance']):,} 公尺"
         if reason and self.valves.SHOW_REASONS:
             lines.append(f"✨ {reason}")
         lines.append(f"🏠 {r['address']}｜🗺️ [在 Google Maps 開啟]({r['maps_url']})")
@@ -1292,14 +1289,13 @@ class Bot:
         # 「推薦別的」→ 排除同樣條件下已經推薦過的店
         condition_line = self.describe_conditions(district, category, party_size, budget, source, subtype,
                                                   info["llm_note"], prefs)
-        extra_line = self.prefs_line(prefs)
         more = self.wants_more(user_text) or info["intent"] == "more"
         before = self.rejected_history(messages)
         if info["new_request"]:
             # 全新的需求：之前不想去的店不再排除（畫面上會說明，使用者還是不想去可以再說）
             info["cleared_rejects"], before = [n for n in before if n not in rejects], []
         rejected = list(dict.fromkeys(before + rejects))
-        history = self.shown_restaurants(messages, condition_line, extra_line)
+        history = self.shown_restaurants(messages, condition_line)
         if more:
             # 換一批：同條件下推薦過的都排除（使用者說要保留的除外）
             skipped = [n for n in history if n not in info["keep"]]
@@ -1356,17 +1352,22 @@ class Bot:
         if subtype and overview.get("total") == 0:
             return self.ask_no_subtype(subtype, category, where, overview)
         tips = self.describe_alternatives(conditions, len(restaurants), data.get("alternatives") or [], where)
-        banners = self.pref_banners(prefs, data, info, category, len(restaurants))
+        # 要讓使用者知道的事（放寬了什麼、總預算換算、資料沒有的條件…）：交給開場白用一兩句帶過
+        facts = self.explain_facts(prefs, data, info, conditions, total, subtype, restaurants,
+                                   party_relaxed, no_location, exclude, where)
+        sections = [condition_line] if self.valves.SHOW_CONDITIONS else []
+        # 狀態用的行（下一句會讀回來）：新的需求、幫你挑的類型、不再推薦的店
+        if self.new_request_line(info):
+            sections.append(self.new_request_line(info))
+        if picked:
+            sections.append(f"🎲 幫你挑了「{picked}」，想換一種可以再跟我說")
+        if rejects:
+            sections.append(REJECTED_MARK + "".join(f"「{n}」" for n in rejects))
+        fallback = f"💬 {'；'.join(facts)}。" if facts else ""
         if not restaurants or "maps_url" not in restaurants[0]:
             # 沒有結果，或 api.py 還是舊版：直接顯示 API 的文字
-            sections = []
-            if self.valves.SHOW_CONDITIONS:
-                sections.append(condition_line)
-                if extra_line:
-                    sections.append(extra_line)
-            sections += banners
-            if rejects:
-                sections.append(REJECTED_MARK + "".join(f"「{n}」" for n in rejects))
+            if fallback:
+                sections.append(fallback)
             if more and shown:
                 sections.append(f"🔄 這個條件下的店都推薦過了（已推薦 {len(shown)} 家）。")
             else:
@@ -1375,93 +1376,79 @@ class Bot:
                 sections.append(tips)
             return "\n\n".join(sections)
 
-        # 3. 組合回答：條件 → 開場 → 每家餐廳（含推薦理由）
-        sections = []
-        if self.valves.SHOW_CONDITIONS:
-            sections.append(condition_line)
-            if extra_line:
-                sections.append(extra_line)
-        sections += banners
-        if party_relaxed:
-            sections.append(f"👥 資料裡的店標示的人數大多在 10 人以內，{party_size} 人找不到符合的，以下先不限人數推薦；"
-                            "人數比較多，建議先打電話確認座位或訂位")
-        if picked:
-            sections.append(f"🎲 幫你挑了「{picked}」，想換一種可以再跟我說")
-        if total and party_size:
-            sections.append(f"🧮 總預算 {total} 元 ÷ {party_size} 人 ≈ 每人 {budget} 元")
-        if rejects:
-            sections.append(REJECTED_MARK + "".join(f"「{n}」" for n in rejects))
-        if more and shown:
-            sections.append(f"🔄 換一批：已排除先前推薦過的 {len(shown)} 家")
-        matched = data.get("matched", len(restaurants))
-        relaxed = data.get("relaxed_budget")
-        # 放寬到原本預算的兩倍以內才說「稍微」（例如 50 元放寬到 450 元就不算稍微）
-        over_label = "比預算稍微高一點" if budget and relaxed and relaxed <= budget * 2 else "超出預算"
-        if budget and relaxed:
-            if matched == 0:
-                sections.append(f"⚠️ 沒有符合每人 {budget} 元預算的店，"
-                                f"以下是{over_label}（放寬到每人約 {relaxed} 元）的選擇。")
-            else:
-                sections.append(f"⚠️ 符合每人 {budget} 元預算的店只有 {matched} 家，"
-                                f"另外補上{over_label}（放寬到每人約 {relaxed} 元）的選擇。")
-        # 子類型：誠實說明哪些店看得出是這種、哪些只是一般同類別的店
-        matched_subtype = data.get("matched_subtype")
-        general = self.shop_label(category)  # 「一般的火鍋店」「一般的美式餐廳」
-        if subtype and matched_subtype is not None:
-            where = self.near_text(prefs) if prefs.get("near") else (district or "台北")
-            shown_sub = sum(1 for r in restaurants if r.get("subtype_match"))
-            if shown_sub == 0 and exclude and matched_subtype == 0:
-                sections.append(f"⚠️ 店名看得出是「{subtype}」的店都推薦過了，"
-                                f"以下是一般的{general}，不一定有{subtype}。")
-            elif shown_sub == 0:
-                elsewhere = (f"（全台北有 {overview['total']} 家，想看可以說「不限地區」）"
-                             if overview.get("total") else "")
-                sections.append(f"⚠️ 資料庫裡找不到{where}店名看得出是「{subtype}」的店{elsewhere}，"
-                                f"以下先推薦一般的{general}，不一定有{subtype}。")
-            elif shown_sub < len(restaurants):
-                over_sub = sum(1 for r in restaurants if r.get("subtype_match") and r.get("budget_fit") == "over")
-                if over_sub == shown_sub:
-                    note = "（比預算稍微高一點）"
-                elif over_sub:
-                    note = f"（其中 {over_sub} 家比預算稍微高一點）"
-                else:
-                    note = ""
-                sections.append(f"🏷️ 店名看得出是「{subtype}」的有 {shown_sub} 家，排在最前面{note}；"
-                                f"後面是一般的{general}，不一定有{subtype}。")
-        # LLM 開場白和推薦理由（上面的說明畫面上已經顯示，開場白不再重複）
+        # 開場白（LLM）＋每家餐廳的推薦理由
         texts, _ = self.current_round(messages)
         # 人數太多、不限人數找的：不讓 LLM 說「適合 30 人」這種資料沒辦法確認的事
         reason_conditions = (district, category, None if party_relaxed else party_size, budget)
         notes = []
-        if no_location:
-            notes.append("使用者想要越近越好，但沒有提供所在的捷運站，你讀不到使用者的位置，"
-                         "所以這批是照一般的推薦順序。開場請先委婉說明這件事")
-        elif prefs.get("sort"):
+        if facts:
+            notes.append("這批推薦有些事要讓使用者知道，開場請用一兩句自然地帶過（不用寫出放寬到多少）："
+                         + "；".join(facts))
+        if prefs.get("sort") and not no_location:
             notes.append(f"這批店依「{SORT_LABELS[prefs['sort']]}」排序，開場可以順帶提一下")
         intro, reasons = self.write_reasons(texts, reason_conditions, restaurants, subtype,
                                             prefs.get("unsupported"), notes)
         if intro:
             sections.append(f"💬 {intro}")
-        elif no_location:
-            sections.append("📍 我讀不到你的位置，沒辦法依距離排，以下先照一般的推薦順序。")
-        blocks = []
-        for i, (r, reason) in enumerate(zip(restaurants, reasons), 1):
-            prev = restaurants[i - 2] if i > 1 else None
-            is_over = r.get("budget_fit") == "over"
-            # 子類型的店之後，接著是一般同類別的店 → 加分隔標題
-            if subtype and prev and prev.get("subtype_match") and not r.get("subtype_match"):
-                extra = "，比預算稍微高一點" if is_over else ""
-                blocks.append(f"🍽️ **以下是一般的{general}（店名看不出是不是{subtype}{extra}）**")
-            # 一般的店裡，預算內的店之後接著是比預算稍微高一點的店
-            elif (is_over and prev and prev.get("budget_fit") != "over"
-                  and not (subtype and r.get("subtype_match"))):
-                blocks.append(f"💸 **以下是{over_label}的選擇（放寬到每人約 {relaxed or '更高'} 元）**")
-            anchor = f"捷運{data['near']}站" if data.get("near") else ""
-            blocks.append(self.format_card(i, r, reason, anchor))
-        sections.append("\n\n---\n\n".join(blocks))
+        elif fallback:
+            sections.append(fallback)
+        sections.append("\n\n---\n\n".join(self.format_card(i, r, reason)
+                                              for i, (r, reason) in enumerate(zip(restaurants, reasons), 1)))
         if tips:
             sections.append(tips)
         return "\n\n".join(sections)
+
+    def explain_facts(self, prefs, data, info, conditions, total, subtype, restaurants, party_relaxed,
+                      no_location, exclude, where) -> list:
+        """這批推薦要讓使用者知道的事（簡短，不寫放寬到多少）。有 LLM 時交給開場白帶過，沒有時直接顯示。"""
+        district, category, party_size, budget = conditions
+        found = len(restaurants)
+        facts = []
+        if no_location:
+            facts.append("我讀不到你的位置，沒辦法依距離排，先照一般的推薦順序")
+        if prefs.get("near") and not data.get("near"):
+            facts.append(f"還沒有捷運{prefs['near']}站的位置資料，先不限地區找")
+        elif data.get("radius_relaxed"):
+            facts.append(f"捷運{prefs['near']}站附近符合的店不多，範圍放寬了一點")
+        relaxed = data.get("relaxed_budget")
+        if budget and relaxed:
+            # 放寬到原本預算的兩倍以內才說「稍微」（例如 50 元放寬到 450 元就不算稍微）
+            over = "稍微超出預算" if relaxed <= budget * 2 else "超出預算"
+            facts.append(f"沒有完全符合預算的店，以下是{over}的選擇" if data.get("matched", found) == 0
+                         else f"符合預算的店不多，另外補上{over}的店")
+        if party_relaxed:
+            facts.append(f"資料裡的店標示的人數大多在 10 人以內，{party_size} 人先不限人數找，建議先打電話訂位")
+        if total and party_size:
+            facts.append(f"總預算 {total} 元、{party_size} 個人，大約每人 {budget} 元")
+        if prefs.get("hidden_gem") and 0 < found < 5:
+            facts.append(f"符合隱藏版的店只有 {found} 家")
+        matched_subtype = data.get("matched_subtype")
+        if subtype and matched_subtype is not None and restaurants:
+            general = self.shop_label(category)
+            shown_sub = sum(1 for r in restaurants if r.get("subtype_match"))
+            overview = data.get("subtype_overview") or {}
+            if shown_sub == 0 and exclude and matched_subtype == 0:
+                facts.append(f"店名看得出是{subtype}的店都推薦過了，這批是一般的{general}，不一定有{subtype}")
+            elif shown_sub == 0:
+                elsewhere = "，想看其他區的可以說「不限地區」" if overview.get("total") else ""
+                facts.append(f"{where or '台北'}找不到店名看得出是{subtype}的店，先推薦一般的{general}，"
+                             f"不一定有{subtype}{elsewhere}")
+            elif shown_sub < found:
+                facts.append(f"前 {shown_sub} 家店名看得出是{subtype}，後面是一般的{general}，不一定有{subtype}")
+        if prefs.get("unsupported"):
+            facts.append(f"資料沒有{'、'.join(prefs['unsupported'])}的資訊，出發前請在 Google Maps 確認")
+        return facts
+
+    @staticmethod
+    def new_request_line(info: dict) -> str:
+        """「🆕 這是新的需求，…」（也是狀態：之後讀回不喜歡的店時，從這裡重新算）。"""
+        notes = []
+        if info.get("dropped_prefs"):
+            notes.append(f"之前的「{info['dropped_prefs']}」已經不再套用")
+        if info.get("cleared_rejects"):
+            notes.append("之前不想去的" + "".join(f"「{n}」" for n in info["cleared_rejects"])
+                         + "也不再排除，還是不想去可以再跟我說")
+        return NEW_REQUEST_MARK + "，".join(notes) if notes else ""
 
     @staticmethod
     def after_reset(messages: list) -> list:
@@ -1543,35 +1530,6 @@ class Bot:
         if not category:
             return "餐廳"
         return category if category.endswith(("餐廳", "店", "吧")) else category + "店"
-
-    def pref_banners(self, prefs: dict, data: dict, info: dict, category, found: int) -> list:
-        """其他條件的說明：錯字修正、新需求、附近範圍、排除連鎖、隱藏版、資料沒有的條件。"""
-        lines = []
-        if info.get("fixes"):
-            lines.append("✏️ " + "、".join(f"「{a}」看成「{b}」" for a, b in info["fixes"]))
-        notes = []
-        if info.get("dropped_prefs"):
-            notes.append(f"之前的「{info['dropped_prefs']}」已經不再套用")
-        if info.get("cleared_rejects"):
-            notes.append("之前不想去的" + "".join(f"「{n}」" for n in info["cleared_rejects"])
-                         + "也不再排除，還是不想去可以再跟我說")
-        if notes:
-            lines.append(NEW_REQUEST_MARK + "，".join(notes))
-        if prefs.get("near") and data.get("near"):
-            if data.get("radius_relaxed"):
-                lines.append(f"📏 捷運{prefs['near']}站 {data.get('radius_first', 800)} 公尺內符合的店不到 5 家，"
-                             f"範圍放寬到 {data['radius'] / 1000:g} 公里。")
-        elif prefs.get("near"):
-            lines.append(f"⚠️ 推薦服務還沒有「捷運{prefs['near']}站」的座標（api.py 可能是舊版），先不限地區找。")
-        if prefs.get("no_chain") and data.get("chain_removed"):
-            lines.append(f"🏪 已排除 {data['chain_removed']} 家連鎖店（同一個品牌在資料裡有 2 家以上的店）")
-        if prefs.get("hidden_gem") and 0 < found < 5:
-            # 定義已經寫在「🎛️ 其他條件：隱藏版（評分高、評論數較少）」，這裡只在家數不夠時說明
-            lines.append(f"🔍 符合隱藏版的店只有 {found} 家")
-        if prefs.get("unsupported"):
-            items = "".join(f"「{u}」" for u in prefs["unsupported"])
-            lines.append(f"⚠️ 目前的資料沒有{items}的資訊，沒辦法幫你篩選，出發前請點 Google Maps 確認。")
-        return lines
 
     @staticmethod
     def describe_alternatives(conditions, found: int, alternatives: list, where_label=None) -> str:
