@@ -3,3 +3,8 @@ __pycache__/
 .env
 data/*.zip
 eval/parser_results_*.csv
+
+# 金鑰、密碼類檔案不要進 git
+.env.*
+*.key
+*secret*
