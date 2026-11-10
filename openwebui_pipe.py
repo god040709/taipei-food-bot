@@ -300,9 +300,33 @@ class Pipe:
             timeout=60,
         )
         r.raise_for_status()
-        text = r.json()["choices"][0]["message"]["content"] or ""
-        # 移除可能出現的思考內容
-        return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        choice = r.json()["choices"][0]
+        text = choice.get("message", {}).get("content") or ""
+        # 移除思考內容：有些模板只輸出結尾的 </think>，所以取最後一個 </think> 之後的文字
+        if "</think>" in text:
+            text = text.rsplit("</think>", 1)[1]
+        text = re.sub(r"<think>.*", "", text, flags=re.DOTALL).strip()  # 思考到一半被截斷
+        if not text and choice.get("finish_reason") == "length":
+            raise ValueError("LLM 回應被截斷（可能在思考）")
+        return text
+
+    @staticmethod
+    def _extract_json(raw: str) -> dict:
+        """從 LLM 回應裡找出 JSON 物件（可能包在 ```json 裡、前後有說明文字）。"""
+        decoder = json.JSONDecoder()
+        found = None
+        for i, ch in enumerate(raw):
+            if ch != "{":
+                continue
+            try:
+                obj, _ = decoder.raw_decode(raw[i:])
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                found = obj  # 取最後一個完整的物件（前面可能是思考或範例）
+        if found is None:
+            raise ValueError(f"LLM 沒有回傳 JSON：{raw[:60]}")
+        return found
 
     # ------------------------------------------------------------------
     # 條件解析：LLM 優先，失敗時退回規則
@@ -371,11 +395,8 @@ class Pipe:
         system = PARSE_PROMPT
         if recent_names:
             system += "\n最近推薦過的店：\n" + "\n".join(f"{i}. {n}" for i, n in enumerate(recent_names, 1))
-        raw = self._chat([{"role": "system", "content": system}] + history, max_tokens=300)
-        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-        if not match:
-            raise ValueError(f"LLM 沒有回傳 JSON：{raw[:100]}")
-        data = json.loads(match.group(0))
+        raw = self._chat([{"role": "system", "content": system}] + history, max_tokens=800)
+        data = self._extract_json(raw)
 
         district = data.get("district")
         district = district if district in DISTRICTS else None
@@ -504,8 +525,11 @@ class Pipe:
                 info["llm_note"] = f"LLM 回應錯誤 HTTP {e.response.status_code}"
             except requests.exceptions.RequestException:
                 info["llm_note"] = "連不到 LLM 服務"
-            except Exception:
-                info["llm_note"] = "LLM 回傳格式不對"
+            except Exception as e:
+                # 附上一小段原因（LLM 實際回了什麼），方便除錯
+                detail = re.sub(r"[\s（）()｜]+", " ", str(e)).strip()[:50]
+                info["llm_note"] = f"LLM 回傳格式不對：{detail}" if detail else "LLM 回傳格式不對"
+                print(f"[taipei_food_bot] LLM parse failed: {e!r}")
         if conditions is None:
             conditions = self.parse_rounds(messages)
         # 使用者說「不限地區」「預算不限」→ 那一項清空
@@ -777,7 +801,7 @@ class Pipe:
                 ],
                 max_tokens=900,
             )
-            result = json.loads(re.search(r"\{.*\}", raw, flags=re.DOTALL).group(0))
+            result = self._extract_json(raw)
             reasons = [str(x).strip() for x in result.get("reasons", [])]
             if len(reasons) != len(restaurants):
                 raise ValueError("推薦理由數量不符")
