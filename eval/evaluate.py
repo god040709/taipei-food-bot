@@ -2,7 +2,8 @@
 成效評估腳本
 1. 條件解析準確率：比較舊版 / 新版（之後可加入 LLM 版）的解析結果
 2. 排序品質：比較舊版（只看評分）與新版（加權推薦指數）的前 5 名
-執行：python eval/evaluate.py
+執行：python eval/evaluate.py          （只評估規則解析，不會呼叫 LLM）
+      python eval/evaluate.py --llm    （另外評估 LLM 解析，需要環境變數 LLM_API_KEY，約 30 次呼叫）
 """
 import os
 import re
@@ -14,7 +15,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-from openwebui_pipe import CATEGORIES, DISTRICTS, Pipe  # noqa: E402
+from bot import Bot  # noqa: E402
+from lexicon import CATEGORIES, DISTRICTS  # noqa: E402
+from llm import DirectLLM, LLMError, NoLLM  # noqa: E402
 from recommender import DF_PATH, compute_scores  # noqa: E402
 
 FIELDS = ["district", "category", "party_size", "budget"]
@@ -35,18 +38,14 @@ class OldPipe:
 class LLMParser:
     """用 LLM 解析（需要環境變數 LLM_API_KEY，可選 LLM_BASE_URL、LLM_MODEL）"""
     def __init__(self):
-        self.pipe = Pipe()
-        self.pipe.valves.LLM_API_KEY = os.environ["LLM_API_KEY"]
-        if os.environ.get("LLM_BASE_URL"):
-            self.pipe.valves.LLM_BASE_URL = os.environ["LLM_BASE_URL"]
-        if os.environ.get("LLM_MODEL"):
-            self.pipe.valves.LLM_MODEL = os.environ["LLM_MODEL"]
+        self.llm = DirectLLM(max_calls=40)
+        self.bot = Bot(self.llm)
         self.failures = 0
 
     def parse_user_query(self, text):
         try:
-            return self.pipe.parse_with_llm([{"role": "user", "content": text}])
-        except Exception as e:
+            return self.bot.parse_with_llm([{"role": "user", "content": text}])
+        except (LLMError, ValueError) as e:
             self.failures += 1
             print(f"  ⚠️ LLM 失敗：{text}（{e}）")
             return None, None, None, None
@@ -104,14 +103,15 @@ def eval_ranking():
 if __name__ == "__main__":
     tests = pd.read_csv(os.path.join(ROOT, "eval", "test_queries.csv"), dtype=str)
     eval_parser("原始版本（規則）", OldPipe(), tests)
-    results = {"rules": eval_parser("目前版本（規則）", Pipe(), tests)}
-    if os.environ.get("LLM_API_KEY"):
+    results = {"rules": eval_parser("目前版本（規則）", Bot(NoLLM()), tests)}
+    if "--llm" in sys.argv and os.environ.get("LLM_API_KEY"):
         llm = LLMParser()
         results["llm"] = eval_parser("LLM 解析", llm, tests)
+        print(f"  （呼叫 LLM {llm.llm.calls} 次）")
         if llm.failures:
             print(f"  （LLM 呼叫失敗 {llm.failures} 次，這些句子算答錯）")
     else:
-        print("\n（未設定 LLM_API_KEY，略過 LLM 解析評估）")
+        print("\n（沒有加 --llm 或沒有設定 LLM_API_KEY，略過 LLM 解析評估）")
     for name, df in results.items():
         out = os.path.join(ROOT, "eval", f"parser_results_{name}.csv")
         df.to_csv(out, index=False, encoding="utf-8-sig")

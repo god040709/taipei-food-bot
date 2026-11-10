@@ -1,0 +1,1178 @@
+"""
+台北美食推薦機器人的對話流程：理解需求 → 反問／排除／換一批 → 查餐廳 → 組合回覆。
+api.py 的 /chat 會呼叫這裡；Open WebUI 的 pipe 只負責把對話轉過來。
+"""
+import json
+import re
+from typing import Optional
+
+import service
+from lexicon import *  # noqa: F401,F403  詞庫、提示詞、文字處理
+from llm import LLMError
+
+class Options:
+    """機器人的設定（從 Open WebUI 函式的 Valves 傳過來，沒給就用預設值）。"""
+    USE_LLM_PARSER = True   # 用 LLM 理解使用者需求
+    USE_LLM_REASON = True   # 用 LLM 寫推薦理由
+    SHOW_CONDITIONS = True  # 在回答開頭顯示解析出的條件
+    ASK_FOLLOWUP = True     # 資訊不足時持續反問，直到地區、類型、人數、預算都清楚
+    MAX_ASK = 4             # 同一個需求最多反問幾次（避免一直問不完）
+    SHOW_REASONS = True     # 在每家餐廳附上推薦理由
+
+    def __init__(self, values: Optional[dict] = None):
+        for key, value in (values or {}).items():
+            if hasattr(Options, key) and isinstance(value, type(getattr(Options, key))):
+                setattr(self, key, value)
+
+
+class Bot:
+    """對話機器人：收到整段對話，回傳下一則回覆。
+    llm：有 enabled 屬性和 chat(messages, max_tokens, schema) 方法的物件（見 llm.py）。"""
+
+    def __init__(self, llm, options: Optional[dict] = None):
+        self.llm = llm
+        self.valves = Options(options)
+
+    # ------------------------------------------------------------------
+    # LLM 呼叫
+    # ------------------------------------------------------------------
+    def _llm_enabled(self) -> bool:
+        return bool(getattr(self.llm, "enabled", False))
+
+    def _chat(self, messages: list, max_tokens: int = 400, schema: Optional[dict] = None) -> str:
+        return self.llm.chat(messages, max_tokens, schema)
+
+    @staticmethod
+    def _extract_json(raw: str) -> dict:
+        """從 LLM 回應裡找出 JSON 物件（可能包在 ```json 裡、前後有說明文字）。"""
+        decoder = json.JSONDecoder()
+        found = None
+        i = 0
+        while i < len(raw):
+            if raw[i] != "{":
+                i += 1
+                continue
+            try:
+                obj, end = decoder.raw_decode(raw, i)
+            except ValueError:
+                i += 1
+                continue
+            if isinstance(obj, dict):
+                found = obj  # 取最後一個完整的物件（前面可能是思考或範例）
+            i = end  # 跳過整個物件，不要把裡面的 {"near": …} 當成另一個物件
+        if found is None:
+            raise ValueError(f"LLM 沒有回傳 JSON：{raw[:60]}")
+        return found
+
+    # ------------------------------------------------------------------
+    # 條件解析：LLM 優先，失敗時退回規則
+    # ------------------------------------------------------------------
+    def parse_user_query(self, text: str):
+        """規則解析（不需要 LLM），支援常見口語說法。"""
+        district = None
+        category = None
+        budget = None
+        party_size = None
+        text = fix_homophones(text)[0]  # 同音錯字：「大按」→「大安」
+
+        # 行政區：「大安區」或省略「區」的「大安」
+        for d in DISTRICTS:
+            if d in text or d.replace("區", "") in text:
+                district = d
+                break
+
+        # 類別：先找標準名稱，再找同義詞（麻辣鍋→火鍋、韓國菜→韓式料理…）；
+        # 「不要火鍋」「剛吃過拉麵」這種說不要的不算
+        wanted = [c for _, c, neg in self.category_mentions(text) if not neg]
+        category = next((c for c in CATEGORIES if c in wanted and c in text), None) \
+            or (wanted[0] if wanted else None)
+
+        # 人數：「3人」「3位」「三個人」「我們6個人」「一個人」
+        party_match = re.search(NUM + r"\s*個?\s*(?:人|位)", text)
+        if party_match:
+            party_size = to_number(party_match.group(1))
+
+        # 預算：「預算1000」「預算一千」「1000元」「500以內」「一人500」「每人一千」「1k」
+        filler = r"\s*(?:大概|大約|約|差不多|抓|在|是|最多|頂多|上限|不超過|：|:)*\s*"
+        budget_patterns = [
+            r"預算" + filler + NUM,
+            r"(?:一人|每人|每位|一位)" + filler + NUM,
+            NUM + r"\s*(?:元|塊|以內|以下)",
+            NUM + r"\s*(?:元|塊)?\s*(?:左右|上下)",
+            r"(\d+(?:\.\d+)?\s*[kK])",
+        ]
+        for pattern in budget_patterns:
+            m = re.search(pattern, text)
+            if m:
+                budget = to_number(m.group(1))
+                break
+        if budget is None:
+            # 單獨的數字（「大安 火鍋 2人 800」的 800）：前後是空白或標點才算，「台北101」的 101 不算
+            m = re.search(r"(?:^|[\s,，、。:：])(\d{3,5})(?=$|[\s,，、。!！?？~～])", text)
+            if m and int(m.group(1)) >= 100:
+                budget = int(m.group(1))
+
+        return district, category, party_size, budget
+
+    def parse_with_llm(self, messages: list):
+        """用 LLM 解析整段對話，回傳 (district, category, party_size, budget)。"""
+        d = self.parse_with_llm_full(messages, self.last_recommended(messages))
+        return d["district"], d["category"], d["party_size"], d["budget"]
+
+    def parse_with_llm_full(self, messages: list, recent_names: list) -> dict:
+        """用 LLM 解析條件、意圖（search/more/reject/chat）與不喜歡的店。"""
+        # 把對話整理成「一段文字」交給 LLM，而不是原樣當成多輪對話：
+        # 否則模型會模仿助理先前的回答（「🔎 搜尋條件：…」），不回 JSON。
+        lines = []
+        for m in messages[-12:]:
+            content = m.get("content", "")
+            role = m.get("role")
+            if not isinstance(content, str) or role not in ("user", "assistant"):
+                continue
+            if role == "user":
+                lines.append(f"使用者：{content[:300]}")
+            elif content.startswith(ASK_MARK):
+                lines.append(f"助理（反問）：{content[:200]}")
+            elif content.startswith(CHAT_MARK):
+                lines.append(f"助理（閒聊）：{content[len(CHAT_MARK):][:150]}")
+            else:
+                # 推薦結果只留先前的條件，其餘省略
+                cond = re.search(r"🔎 搜尋條件：([^（\n]+)", content)
+                extra = next((l[len(PREFS_MARK):] for l in content.splitlines() if l.startswith(PREFS_MARK)), "")
+                lines.append(f"助理：（推薦了餐廳；當時的條件是 {cond.group(1).strip() if cond else '未知'}"
+                             f"{'；其他條件：' + extra if extra else ''}）")
+
+        system = PARSE_PROMPT
+        if recent_names:
+            system += "\n最近推薦過的店：\n" + "\n".join(f"{i}. {n}" for i, n in enumerate(recent_names, 1))
+        user = ("以下是對話紀錄，最後一行是使用者這次說的話：\n\n" + "\n".join(lines)
+                + "\n\n請依規則只輸出 JSON 物件，第一個字元必須是 {。")
+        raw = self._chat([{"role": "system", "content": system}, {"role": "user", "content": user}],
+                         max_tokens=800)
+        data = self._extract_json(raw)
+
+        district = data.get("district")
+        district = district if district in DISTRICTS else None
+        category = data.get("category")
+        category = category if category in CATEGORIES else None
+
+        def to_int(v):
+            try:
+                v = int(float(v))
+                return v if v > 0 else None
+            except (TypeError, ValueError):
+                return None
+
+        intent = data.get("intent") if data.get("intent") in ("search", "more", "reject", "chat") else "search"
+        reject = [n for n in (data.get("reject") or []) if n in recent_names]
+        return {"district": district, "category": category,
+                "party_size": to_int(data.get("party_size")), "budget": to_int(data.get("budget")),
+                "intent": intent, "reject": reject, "prefs": self.clean_llm_prefs(data.get("extra"), to_int)}
+
+    @staticmethod
+    def clean_llm_prefs(extra, to_int) -> dict:
+        """檢查 LLM 回傳的其他條件，不合規定的丟掉（例如不存在的車站、類別）。"""
+        if not isinstance(extra, dict):
+            return {}
+        p = {}
+        near = extra.get("near")
+        if isinstance(near, str) and near.strip():
+            found = find_near(near.strip()) or find_near(near.strip() + "站")
+            if found:
+                p["near"], p["near_label"] = found
+        for k in ("no_chain", "hidden_gem", "pick_one"):
+            if isinstance(extra.get(k), bool):
+                p[k] = extra[k]
+        if to_int(extra.get("budget_min")):
+            p["budget_min"] = to_int(extra.get("budget_min"))
+        for src, dst in (("avoid_categories", "avoid"), ("categories", "cats")):
+            cats = [c for c in (extra.get(src) or []) if c in CATEGORIES]
+            if cats and (dst == "avoid" or len(cats) >= 2):
+                p[dst] = list(dict.fromkeys(cats))
+        unsupported = [str(u)[:10] for u in (extra.get("unsupported") or []) if str(u).strip()]
+        if unsupported:
+            p["unsupported"] = unsupported[:4]
+        return p
+
+    @staticmethod
+    def current_round(messages: list):
+        """這次需求的對話：從上一次「推薦」之後開始算（中間的反問不算結束）。
+        回傳 (使用者訊息 list, 已經反問幾次)。"""
+        texts, asks = [], 0
+        for m in reversed(messages):
+            content = m.get("content", "")
+            if not isinstance(content, str):
+                continue
+            if m.get("role") == "user":
+                texts.append(content)
+            elif m.get("role") == "assistant":
+                if content.startswith(CHAT_MARK):
+                    continue  # 閒聊回覆：跳過
+                if not content.startswith(ASK_MARK):
+                    break
+                asks += 1
+        texts.reverse()
+        return texts, asks
+
+    @staticmethod
+    def previous_conditions(messages: list):
+        """上一次推薦用的條件（從回答第一行「🔎 搜尋條件：…」讀回來），沒有就回傳 None。
+        讓使用者推薦完之後可以說「不限地區」「預算 500」「換成燒肉」來修改搜尋。"""
+        for m in reversed(messages[:-1]):
+            content = m.get("content", "")
+            if m.get("role") != "assistant" or not isinstance(content, str):
+                continue
+            if content.startswith((ASK_MARK, CHAT_MARK)):
+                continue
+            match = re.search(r"🔎 搜尋條件：(.+?)（", content)
+            if not match:
+                return None
+            parts = match.group(1).split("｜")
+            district = next((p for p in parts if p in DISTRICTS), None)
+            category = next((p.split("・")[0] for p in parts if p.split("・")[0] in CATEGORIES), None)
+            party = re.search(r"(\d+) 人", match.group(1))
+            budget = re.search(r"每人 (\d+) 元內", match.group(1))
+            return (district, category,
+                    int(party.group(1)) if party else None,
+                    int(budget.group(1)) if budget else None)
+        return None
+
+    def parse_rounds(self, messages: list):
+        """規則解析多輪：機器人反問後，把使用者這幾次的回答合併起來。"""
+        texts, _ = self.current_round(messages)
+        merged = list(self.previous_conditions(messages) or [None, None, None, None])
+        for i, text in enumerate(texts):
+            parsed = list(self.parse_user_query(text))
+            # 回答反問時，單獨一個數字（例如「800」）視為每人預算
+            if i > 0 and parsed[3] is None:
+                for m in re.finditer(NUM + r"(?!\s*個?\s*(?:人|位))", text):
+                    n = to_number(m.group(1))
+                    if n and n >= 50:
+                        parsed[3] = n
+                        break
+            merged = [new if new is not None else old for old, new in zip(merged, parsed)]
+        return tuple(merged)
+
+    @staticmethod
+    def previous_subtype(messages: list) -> Optional[str]:
+        """上一次推薦的子類型（「🔎 搜尋條件：…｜火鍋・壽喜燒｜…」），沒有就回傳 None。"""
+        for m in reversed(messages[:-1]):
+            content = m.get("content", "")
+            if m.get("role") != "assistant" or not isinstance(content, str) \
+                    or content.startswith((ASK_MARK, CHAT_MARK)):
+                continue
+            match = re.search(r"🔎 搜尋條件：[^（]*?・([^｜（]+)", content)
+            return match.group(1) if match and match.group(1) in SUBTYPES else None
+        return None
+
+    @staticmethod
+    def detect_subtype(text: str, category: Optional[str]) -> Optional[str]:
+        """從一句話找出子類型。同時符合多個時，優先選屬於 category 的，再選說法比較長的。"""
+        lower = text.lower()
+        found = []
+        for name, (parent, triggers, _, _) in SUBTYPES.items():
+            hit = max((len(t) for t in triggers if t.lower() in lower), default=0)
+            if hit:
+                found.append((parent == category, hit, name))
+        return max(found)[2] if found else None
+
+    @staticmethod
+    def total_budget(texts: list) -> Optional[int]:
+        """這次需求裡提到的「總預算」（不是每人），沒有就回傳 None。"""
+        for text in reversed(texts):
+            m = re.search(TOTAL_RE + BUDGET_FILLER + NUM, text)
+            if m:
+                return to_number(m.group(1))
+        return None
+
+    # ------------------------------------------------------------------
+    # 其他條件：捷運站附近、不要連鎖、隱藏版、預算下限、不要的類別、多類別、類似某間
+    # ------------------------------------------------------------------
+    @staticmethod
+    def category_mentions(text: str) -> list:
+        """這句話提到的類別：[(位置, 類別, 是不是「不要」)]，依出現順序。
+        子類型的說法（「韓式烤肉」）算它的大類別，而且優先於比較短的詞（不會變成「韓式」＋「烤肉」）。"""
+        lower = text.lower()
+        words = [(c, c, False) for c in CATEGORIES]
+        words += [(w, c, False) for c, ws in CATEGORY_SYNONYMS.items() for w in ws]
+        words += [(t, parent, True) for parent, triggers, _, _ in SUBTYPES.values() for t in triggers]
+        taken = [False] * len(text)
+        found = []
+        for word, cat, is_sub in sorted(words, key=lambda w: -len(w[0])):
+            w = word.lower()
+            start = lower.find(w)
+            while start != -1:
+                end = start + len(w)
+                rest = lower[end:].lstrip("的 ")
+                modifier = word in STYLE_WORDS and any(
+                    rest.startswith(x.lower()) for x in CATEGORIES + [s for ws in CATEGORY_SYNONYMS.values() for s in ws])
+                if modifier:
+                    pass  # 「日式燒肉」的「日式」只是形容「燒肉」
+                elif not any(taken[start:end]):
+                    for k in range(start, end):
+                        taken[k] = True
+                    neg = (re.search(NEG_BEFORE_RE, text[max(0, start - 6):start]) is not None
+                           or re.match(NEG_AFTER_RE, text[end:end + 5]) is not None)
+                    found.append((start, cat, neg and not is_sub))  # 「不要麻辣鍋」不代表整個火鍋類都不要
+                start = lower.find(w, end)
+        return sorted(found)
+
+    def parse_prefs(self, text: str) -> dict:
+        """這句話「有提到」的其他條件（沒提到的不會出現在結果裡）。"""
+        t = fix_homophones(text)[0]
+        lower = t.lower()
+        p = {}
+        near = find_near(t)
+        if near:
+            p["near"], p["near_label"] = near
+        if re.search(CHAIN_OK_RE, lower):
+            p["no_chain"] = False
+        elif re.search(CHAIN_OFF_RE, t):
+            p["no_chain"] = True
+        if re.search(HIDDEN_OFF_RE, t):
+            p["hidden_gem"] = False
+        elif re.search(HIDDEN_ON_RE, t):
+            p["hidden_gem"] = True
+        # 預算區間「500 到 1000」→ 下限 500、上限 1000；「1000 以上」→ 只有下限
+        m = re.search(NUM + r"\s*(?:元|塊)?\s*(?:到|至|~|～|-|－)\s*" + NUM + r"\s*(?:元|塊)?(?!\s*個?\s*(?:人|位))", t)
+        lo = hi = None
+        if m:
+            lo, hi = to_number(m.group(1)), to_number(m.group(2))
+        if lo and hi and 50 <= lo < hi:
+            p["budget_min"], p["budget_max"] = lo, hi
+        else:
+            m = re.search(NUM + r"\s*(?:元|塊)?\s*(?:以上|起跳)", t)
+            if m and (to_number(m.group(1)) or 0) >= 50:
+                p["budget_min"] = to_number(m.group(1))
+        mentions = self.category_mentions(t)
+        avoid = list(dict.fromkeys(c for _, c, neg in mentions if neg))
+        want = list(dict.fromkeys(c for _, c, neg in mentions if not neg))
+        if avoid:
+            p["avoid"] = avoid
+        if want:
+            p["want"] = want
+        if len(want) >= 2:
+            p["cats"] = want  # 「日式或韓式都可以」
+        if re.search(PICK_ONE_RE, t):
+            p["pick_one"] = True
+        unsupported = [label for label, ws in UNSUPPORTED.items() if any(w in lower for w in ws)]
+        if unsupported:
+            p["unsupported"] = unsupported
+        return p
+
+    def find_similar(self, text: str, names: list) -> Optional[str]:
+        """「跟第 2 間差不多的」「類似肉老大的」→ 那家店的店名。"""
+        if not names or not re.search(SIMILAR_RE, text):
+            return None
+        picked = self.match_names(text, names)
+        return picked[0] if picked else None
+
+    @staticmethod
+    def previous_prefs(messages: list) -> dict:
+        """上一次推薦用的其他條件（從條件行和「🎛️ 其他條件：…」讀回來）。"""
+        for m in reversed(messages[:-1]):
+            content = m.get("content", "")
+            if m.get("role") != "assistant" or not isinstance(content, str) \
+                    or content.startswith((ASK_MARK, CHAT_MARK)):
+                continue
+            cond = re.search(r"🔎 搜尋條件：(.+?)（", content)
+            if not cond:
+                return {}
+            p = {}
+            near = re.search(r"捷運([^｜]+?)站附近", cond.group(1))
+            if near and near.group(1) in MRT_STATIONS:
+                label = re.search(r"([^｜]+?)・捷運", cond.group(1))
+                p["near"], p["near_label"] = near.group(1), (label.group(1) if label else near.group(1))
+            similar = re.search(r"和「(.+?)」類似", cond.group(1))
+            if similar:
+                p["similar"] = similar.group(1)
+            line = next((l for l in content.splitlines() if l.startswith(PREFS_MARK)), "")
+            for part in line[len(PREFS_MARK):].split("｜") if line else []:
+                if part == "不要連鎖":
+                    p["no_chain"] = True
+                elif part.startswith("隱藏版"):
+                    p["hidden_gem"] = True
+                elif re.match(r"每人 (\d+) 元以上", part):
+                    p["budget_min"] = int(re.match(r"每人 (\d+) 元以上", part).group(1))
+                elif part.startswith("不要："):
+                    p["avoid"] = [c for c in part[3:].split("、") if c in CATEGORIES]
+                elif part.startswith("類型："):
+                    p["cats"] = [c for c in part[3:].split("、") if c in CATEGORIES]
+            return p
+        return {}
+
+    def merge_prefs(self, messages: list, texts: list) -> dict:
+        """上一次的其他條件 + 這次需求裡每一句話的修改。"""
+        prefs = self.previous_prefs(messages)
+        names = self.last_recommended(messages)
+        for text in texts:
+            p = self.parse_prefs(text)
+            district = self.parse_user_query(text)[0]
+            similar = self.find_similar(text, names)
+            if similar:
+                prefs["similar"] = similar
+                prefs.pop("near", None)
+            elif "near" in p:
+                prefs["near"], prefs["near_label"] = p["near"], p["near_label"]
+                prefs.pop("similar", None)
+            elif district:  # 改說行政區 → 不再是「某站附近」
+                for k in ("near", "near_label", "similar"):
+                    prefs.pop(k, None)
+            for k in ("no_chain", "hidden_gem", "budget_min"):
+                if k in p:
+                    prefs[k] = p[k]
+            if p.get("want"):
+                prefs["avoid"] = [c for c in prefs.get("avoid", []) if c not in p["want"]]
+                prefs["cats"] = p.get("cats")
+                if not similar:
+                    prefs.pop("similar", None)
+            if p.get("avoid"):
+                prefs["avoid"] = list(dict.fromkeys(prefs.get("avoid", []) + p["avoid"]))
+        waived = self.waived_fields(texts)
+        if "district" in waived:
+            for k in ("near", "near_label", "similar"):
+                prefs.pop(k, None)
+        if "budget" in waived:
+            prefs.pop("budget_min", None)
+        if "category" in waived:
+            prefs.pop("cats", None)
+        # 只對這一句有效的：只要一間、資料沒有的條件
+        last = self.parse_prefs(texts[-1]) if texts else {}
+        for k in ("pick_one", "budget_max"):
+            if last.get(k):
+                prefs[k] = last[k]
+        unsupported = [u for t in texts for u in self.parse_prefs(t).get("unsupported", [])]
+        if unsupported:
+            prefs["unsupported"] = list(dict.fromkeys(unsupported))
+        return {k: v for k, v in prefs.items() if v not in (None, False, [], "")}
+
+    @staticmethod
+    def prefs_line(prefs: dict) -> str:
+        """「🎛️ 其他條件：不要連鎖｜隱藏版｜…」（下一句會讀回來沿用）。"""
+        parts = []
+        if prefs.get("cats"):
+            parts.append("類型：" + "、".join(prefs["cats"]))
+        if prefs.get("no_chain"):
+            parts.append("不要連鎖")
+        if prefs.get("hidden_gem"):
+            parts.append("隱藏版（評分高、評論數較少）")
+        if prefs.get("budget_min"):
+            parts.append(f"每人 {prefs['budget_min']} 元以上")
+        if prefs.get("avoid"):
+            parts.append("不要：" + "、".join(prefs["avoid"]))
+        return PREFS_MARK + "｜".join(parts) if parts else ""
+
+    def pick_from_last(self, messages: list, user_text: str) -> str:
+        """推薦完之後問「你推薦哪一間？」→ 從剛剛那批挑一家。"""
+        recent = ""
+        for m in reversed(messages[:-1]):
+            content = m.get("content", "")
+            if m.get("role") == "assistant" and isinstance(content, str) \
+                    and not content.startswith((ASK_MARK, CHAT_MARK)):
+                recent = content
+                break
+        card = re.search(r"\*\*1\. (.+?)\*\*\n(.*?)(?:\n\n|\Z)", recent, flags=re.DOTALL)
+        if not card:
+            return CHAT_MARK + "還沒有推薦過餐廳喔，先告訴我想在哪裡吃、吃什麼吧！"
+        if self._llm_enabled():
+            try:
+                reply = self._chat([
+                    {"role": "system", "content": CHAT_PROMPT
+                     + "\n使用者請你從最近推薦的店裡挑一間。只能從清單裡挑，根據資料說明理由，1~3 句。"
+                     + "\n最近的推薦內容：\n" + recent[:2500]},
+                    {"role": "user", "content": user_text},
+                ], max_tokens=300)
+                if reply:
+                    return CHAT_MARK + reply
+            except Exception:
+                pass
+        reason = re.search(r"✨ (.+)", card.group(2))
+        return (f"{CHAT_MARK}如果只選一間，我會選第 1 間「{card.group(1)}」"
+                f"{'：' + reason.group(1) if reason else '。'}\n"
+                f"它是這批裡綜合評分、評論數和預算最符合的。想看其他選擇可以說「推薦別的」。")
+
+    def get_conditions(self, messages: list):
+        """回傳 (條件 tuple, 解析方式, info)。
+        info：total（總預算）、subtype（子類型）、intent / reject（LLM 判斷的意圖與不喜歡的店）、
+              llm_note（LLM 沒用上的原因，顯示在條件行，方便除錯）。
+        總預算會除以人數，換算成每人預算。"""
+        conditions, source = None, "規則"
+        info = {"intent": None, "reject": [], "llm_note": ""}
+        if self.valves.USE_LLM_PARSER and not self._llm_enabled():
+            info["llm_note"] = "未設定 LLM 金鑰"
+        elif self.valves.USE_LLM_PARSER:
+            try:
+                d = self.parse_with_llm_full(messages, self.last_recommended(messages))
+                conditions, source = (d["district"], d["category"], d["party_size"], d["budget"]), "LLM"
+                info.update(intent=d["intent"], reject=d["reject"], llm_prefs=d.get("prefs", {}))
+            except LLMError as e:
+                info["llm_note"] = e.note
+            except Exception as e:
+                # 附上一小段原因（LLM 實際回了什麼），方便除錯
+                detail = re.sub(r"[\s（）()｜]+", " ", str(e)).strip()[:50]
+                info["llm_note"] = f"LLM 回傳格式不對：{detail}" if detail else "LLM 回傳格式不對"
+                print(f"[taipei_food_bot] LLM parse failed: {e!r}")
+        if conditions is None:
+            conditions = self.parse_rounds(messages)
+        # 使用者說「不限地區」「預算不限」→ 那一項清空
+        texts, _ = self.current_round(messages)
+        waived = self.waived_fields(texts)
+        conditions = tuple(None if f in waived else v for f, v in zip(FIELDS, conditions))
+        fixed_texts = [fix_homophones(t)[0] for t in texts]
+        info["fixes"] = fix_homophones(texts[-1])[1] if texts else []
+
+        # 總預算：有人數就換算成每人；還不知道人數就先不填，等問完人數再算
+        total = self.total_budget(fixed_texts)
+        if total:
+            district, category, party_size, _ = conditions
+            budget = total // party_size if party_size else None
+            conditions = (district, category, party_size, budget)
+
+        # 子類型（例如「壽喜燒」）：這次需求有提到就用；沒提到就沿用上一次的（類別沒換的話）
+        district, category, party_size, budget = conditions
+        subtype = None
+        said_category = False  # 較新的一句已經明確說了類別、沒說子類型（例如回答「一般火鍋」）
+        for text in reversed(fixed_texts):
+            subtype = self.detect_subtype(text, category)
+            if subtype:
+                break
+            if any(not neg for _, _, neg in self.category_mentions(text)):
+                said_category = True
+                break
+        if subtype is None and not said_category:
+            prev = self.previous_subtype(messages)
+            if prev and SUBTYPES[prev][0] == category:
+                subtype = prev
+        if subtype:
+            parent = SUBTYPES[subtype][0]
+            if category in (None, parent):
+                category = parent  # 「想吃壽喜燒」→ 類別是火鍋
+            elif any(category in t for t in fixed_texts[-1:]):
+                subtype = None  # 這次明確說了別的類別（例如「換成拉麵」）
+            else:
+                category = parent
+
+        # 其他條件（捷運站附近、不要連鎖、隱藏版、預算下限、不要的類別、多類別、類似某間）
+        prefs = self.merge_prefs(messages, texts)
+        for k, v in (info.get("llm_prefs") or {}).items():
+            prefs.setdefault(k, v)  # 規則沒抓到、LLM 有抓到的才補上
+        if prefs.get("budget_max"):
+            budget = prefs["budget_max"]  # 「500 到 1000」→ 上限 1000
+        if prefs.get("budget_min") and budget and budget <= prefs["budget_min"]:
+            budget = None  # 「1000 以上」：1000 是下限，不是上限
+        if prefs.get("cats"):
+            category = prefs["cats"][0]
+        if category in prefs.get("avoid", []):
+            category, subtype = None, None  # 「不要火鍋」→ 不能再找火鍋
+        conditions = (district, category, party_size, budget)
+        info.update(total=total, subtype=subtype, prefs=prefs)
+        return conditions, source, info
+
+    # ------------------------------------------------------------------
+    # 資訊不足時持續反問
+    # ------------------------------------------------------------------
+    @staticmethod
+    def waived_fields(texts: list) -> set:
+        """使用者說過「不限」的欄位，例如「地區都可以」→ {"district"}。"""
+        waived = set()
+        for text in texts:
+            for field, words in FIELD_SKIP_WORDS.items():
+                if any(w in text for w in words):
+                    waived.add(field)
+        return waived
+
+    @staticmethod
+    def skip_all(text: str) -> bool:
+        """使用者這次說「都可以」「隨便」→ 剩下的條件都不限。"""
+        for words in FIELD_SKIP_WORDS.values():
+            for w in words:
+                text = text.replace(w, "")  # 先拿掉「地區都可以」這類只針對單一條件的說法
+        return any(w in text for w in SKIP_WORDS)
+
+    @staticmethod
+    def answered_by_prefs(prefs: Optional[dict]) -> set:
+        """其他條件已經回答了的欄位：「忠孝復興附近」→ 地區；「不要火鍋」→ 類型；「1000 以上」→ 預算。"""
+        prefs = prefs or {}
+        done = set()
+        if prefs.get("near") or prefs.get("similar"):
+            done.add("district")
+        if prefs.get("similar") or prefs.get("avoid") or prefs.get("cats"):
+            done.add("category")
+        if prefs.get("similar") or prefs.get("budget_min"):
+            done.add("budget")
+        return done
+
+    def should_ask(self, messages: list, conditions, total=None, prefs=None) -> list:
+        """回傳還要問的欄位；空 list 代表資訊足夠，可以推薦。"""
+        if not self.valves.ASK_FOLLOWUP:
+            return []
+        texts, asks = self.current_round(messages)
+        if not texts or self.skip_all(texts[-1]):
+            return []
+        if asks >= self.valves.MAX_ASK:
+            return []  # 已經問很多次了，用目前的條件推薦
+        waived = self.waived_fields(texts) | self.answered_by_prefs(prefs)
+        if total:
+            waived.add("budget")  # 已經有總預算，問到人數就能換算
+        return [f for f, v in zip(FIELDS, conditions) if v is None and f not in waived]
+
+    def ask_question(self, messages: list, conditions, missing: list, total=None, subtype=None,
+                     prefs=None) -> str:
+        texts, asks = self.current_round(messages)
+        waived = self.waived_fields(texts)
+        prefs = prefs or {}
+        known = []
+        for field, value in zip(FIELDS, conditions):
+            if field == "district" and prefs.get("near"):
+                known.append(self.near_text(prefs))
+            elif field == "budget" and total:
+                known.append(f"總預算 {total} 元")
+            elif field == "category" and value and subtype:
+                known.append(f"{value}・{subtype}")
+            elif value is not None:
+                known.append({"party_size": f"{value} 人", "budget": f"每人 {value} 元內"}.get(field, value))
+            elif field in waived:
+                known.append(f"{LABELS[field]}不限")
+
+        if asks == 0:
+            opening = "想幫你找到更適合的餐廳，可以再多告訴我一些嗎？"
+        else:
+            opening = "了解！還差一點點資訊，我就能幫你挑出最合適的餐廳："
+        lines = [f"{ASK_MARK}{opening}"]
+        extra = self.prefs_line(prefs)[len(PREFS_MARK):]
+        if extra:
+            known.append(extra)
+        if known:
+            lines.append(f"目前知道：{'｜'.join(known)}")
+        lines.append("")
+        for i, field in enumerate(missing, 1):
+            lines.append(f"{i}. {QUESTIONS[field]}")
+            if field == "category":
+                # 天氣、心情、場合 → 給點建議
+                hints = [hint for pattern, hint in MOOD_HINTS if any(re.search(pattern, t) for t in texts)]
+                if hints:
+                    lines.append(f"   💡 {hints[0]}")
+        lines.append("")
+        lines.append("直接回覆就可以，例如「信義區 3個人 每人800」；"
+                     "某一項不在意可以說「地區都可以」，全部不在意就回「都可以」。")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # 使用者問「有什麼類型可以選」→ 列出料理類型
+    # ------------------------------------------------------------------
+    @staticmethod
+    def is_category_question(text: str) -> bool:
+        if any(c in text for c in CATEGORIES):
+            return False  # 已經說了想吃的類型，例如「有什麼火鍋推薦」
+        if any(t.lower() in text.lower() for _, triggers, _, _ in SUBTYPES.values() for t in triggers):
+            return False  # 說了子類型，例如「有什麼壽喜燒」
+        if any(w in text for words in FIELD_SKIP_WORDS.values() for w in words):
+            return False  # 「什麼都可以吃」是「不限」，不是在問
+        return re.search(CATEGORY_QUESTION_RE, text) is not None
+
+    def list_categories(self, conditions) -> str:
+        district, _, party_size, budget = conditions
+        counts = {}
+        try:
+            r = service.handle_categories({"district": district, "party_size": party_size, "budget": budget})
+            counts = {c["category"]: c["count"] for c in r.get("categories", [])}
+        except Exception:
+            pass  # API 舊版或連不到：只列類型，不列家數
+
+        where = district or "全台北"
+        if budget:
+            where += f"、每人 {budget} 元內"
+        order = sorted(CATEGORIES, key=lambda c: -counts.get(c, 0)) if counts else CATEGORIES
+        lines = [f"{ASK_MARK}這些料理類型都可以選（{where}）：", ""]
+        if counts:
+            lines += ["| 類型 | 店家數 | 也可以這樣說 |", "|---|---|---|"]
+        else:
+            lines += ["| 類型 | 也可以這樣說 |", "|---|---|"]
+        for c in order:
+            if counts and not counts.get(c):
+                continue  # 這個條件下沒有店的類型就不列
+            examples = "、".join(CATEGORY_SYNONYMS.get(c, [])[:3]) or "—"
+            lines.append(f"| {c} | {counts[c]} 家 | {examples} |" if counts else f"| {c} | {examples} |")
+        lines += ["", "想吃哪一種？直接回覆類型就可以，例如「燒肉」；"
+                      "還沒決定的話，回「類型都可以」我就從各種料理裡挑。"]
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # 「推薦別的」→ 排除已經推薦過的店
+    # ------------------------------------------------------------------
+    @staticmethod
+    def wants_more(text: str) -> bool:
+        return any(w in text for w in MORE_WORDS)
+
+    @staticmethod
+    def shown_restaurants(messages: list, condition_line: str, extra_line: str = "") -> list:
+        """同一組搜尋條件（含其他條件）下，之前已經推薦過的店名。"""
+        names = []
+        for m in messages[:-1]:
+            content = m.get("content", "")
+            if m.get("role") != "assistant" or not isinstance(content, str):
+                continue
+            if condition_line.split("（")[0] not in content:
+                continue
+            old_extra = next((l for l in content.splitlines() if l.startswith(PREFS_MARK)), "")
+            if old_extra != extra_line:
+                continue
+            names += re.findall(r"^\*\*\d+\. (.+?)\*\*$", content, flags=re.MULTILINE)
+        return list(dict.fromkeys(names))  # 同一家可能出現在好幾次回覆裡，只算一次
+
+    # ------------------------------------------------------------------
+    # 「我不喜歡第 2 間」「輕鬆煮吃過了」→ 之後都不再推薦
+    # ------------------------------------------------------------------
+    @staticmethod
+    def last_recommended(messages: list) -> list:
+        """最近一次推薦的店名（依顯示順序）。"""
+        for m in reversed(messages[:-1]):
+            content = m.get("content", "")
+            if m.get("role") != "assistant" or not isinstance(content, str) \
+                    or content.startswith((ASK_MARK, CHAT_MARK)):
+                continue
+            return re.findall(r"^\*\*\d+\. (.+?)\*\*$", content, flags=re.MULTILINE)
+        return []
+
+    @staticmethod
+    def rejected_history(messages: list) -> list:
+        """這段對話裡使用者說過不喜歡／吃過的店（從「🚫 不再推薦：「A」「B」」讀回來）。"""
+        names = []
+        for m in messages[:-1]:
+            content = m.get("content", "")
+            if m.get("role") != "assistant" or not isinstance(content, str):
+                continue
+            for line in content.splitlines():
+                if line.startswith(REJECTED_MARK):
+                    names += re.findall(r"「(.+?)」", line)
+        return names
+
+    @staticmethod
+    def find_rejects(text: str, names: list, force: bool = False):
+        """回傳 (使用者指定不要的店名, 是否在表達「不喜歡／吃過」)。
+        force=True：剛問過「是哪一間呢？」，這次的回覆就算沒說「吃過」也是在指定店家。"""
+        strong = any(w in text for w in REJECT_STRONG) or force
+        soft = any(w in text.lower() for w in REJECT_SOFT)
+        if not (strong or soft) or not names:
+            return [], strong
+        result = Bot.match_names(text, names)
+        if not result and strong and re.search(r"都|全部|這些|這幾|以上", text):
+            result = list(names)
+        return result, (strong or bool(result))
+
+    @staticmethod
+    def match_names(text: str, names: list) -> list:
+        """句子裡指到的店：「第 2 間」「3 號」「前兩間」、店名或店名開頭。"""
+        picked = []
+        for m in re.finditer(r"第\s*([一二兩三四五1-9])\s*(?:間|家|個|名)?", text):
+            picked.append(CN_INDEX.get(m.group(1)) or int(m.group(1)))
+        for m in re.finditer(r"(?<!\d)([1-9])\s*號", text):
+            picked.append(int(m.group(1)))
+        m = re.search(r"前\s*([兩二三四2-4])\s*(?:間|家|個|名)", text)
+        if m:
+            picked += list(range(1, (CN_INDEX.get(m.group(1)) or int(m.group(1))) + 1))
+        result = [names[i - 1] for i in picked if 1 <= i <= len(names)]
+        for name in names:  # 直接說店名，或店名的開頭（例如「肉老大頂級肉品…」說成「肉老大」）
+            key = re.split(r"[\s｜|（(\-—－/／:：,，。]", name)[0]
+            if name in text or (len(key) >= 2 and key in text):
+                result.append(name)
+                continue
+            # 店名開頭至少 3 個字出現在句子裡（太短的像「燒肉」容易誤判，不算）
+            if any(key[:k] in text for k in range(len(key), 2, -1)):
+                result.append(name)
+        return list(dict.fromkeys(result))  # 去重、保留順序
+
+    def ask_which(self, names: list) -> str:
+        lines = [f"{ASK_MARK}是哪一間呢？可以直接說「第 2 間」或店名，我就不會再推薦它："]
+        lines += [f"{i}. {n}" for i, n in enumerate(names, 1)]
+        return "\n".join(lines)
+
+    def chat_reply(self, messages: list) -> Optional[str]:
+        """不是要新推薦的訊息（道謝、閒聊、問細節）→ 用 LLM 自然回覆。"""
+        recent = ""
+        for m in reversed(messages[:-1]):
+            content = m.get("content", "")
+            if m.get("role") == "assistant" and isinstance(content, str) \
+                    and not content.startswith((ASK_MARK, CHAT_MARK)):
+                recent = content[:2500]
+                break
+        history = [{"role": m["role"], "content": str(m.get("content", ""))[:500]}
+                   for m in messages[-6:] if m.get("role") in ("user", "assistant")]
+        try:
+            return self._chat([{"role": "system", "content": CHAT_PROMPT + "\n最近的推薦內容：\n" + recent}]
+                              + history, max_tokens=300)
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # 推薦理由（每家一段，寫餐廳特色）
+    # ------------------------------------------------------------------
+    def write_reasons(self, texts: list, conditions, restaurants: list, subtype=None, notes=None):
+        """回傳 (開場白, 每家的推薦理由 list)。LLM 不能用時，用資料中的事實組成理由。"""
+        fallback = [("；".join(r.get("facts") or []) + "。") if r.get("facts") else ""
+                    for r in restaurants]
+        if not (self.valves.USE_LLM_REASON and self._llm_enabled() and restaurants):
+            return None, fallback
+        district, category, party_size, budget = conditions
+        need = "；".join(texts[-4:])
+        cond = (f"地區={district or '不限'}，類型={category or '不限'}，"
+                f"人數={party_size or '不限'}，每人預算上限={budget or '不限'}")
+        if subtype:
+            cond += (f"，想吃的子類型={subtype}（subtype_match=true 代表店名看得出是{subtype}；"
+                     f"false 的店不可以說它有{subtype}）")
+        keys = ["name", "category", "min_price", "max_price", "subtype_match", "distance",
+                "facts", "summary", "highlights", "reviews"]
+        data = [{k: r.get(k) for k in keys if r.get(k) not in (None, "", [])} for r in restaurants]
+        try:
+            raw = self._chat(
+                [
+                    {"role": "system", "content": REASON_PROMPT},
+                    {"role": "user", "content": f"使用者需求：{need}\n條件：{cond}\n"
+                                                f"系統說明：{'；'.join(notes or []) or '無'}\n\n"
+                                                f"餐廳資料：{json.dumps(data, ensure_ascii=False)}"},
+                ],
+                max_tokens=900,
+            )
+            result = self._extract_json(raw)
+            reasons = [str(x).strip() for x in result.get("reasons", [])]
+            if len(reasons) != len(restaurants):
+                raise ValueError("推薦理由數量不符")
+            return (result.get("intro") or None), reasons
+        except Exception:
+            return None, fallback
+
+    # ------------------------------------------------------------------
+    # 主流程
+    # ------------------------------------------------------------------
+    @staticmethod
+    def near_text(prefs: dict) -> str:
+        """「捷運忠孝復興站附近」「西門町・捷運西門站附近」"""
+        station, label = prefs["near"], prefs.get("near_label") or prefs["near"]
+        if label in station.split("/"):
+            return f"捷運{station}站附近"
+        return f"{label}・捷運{station}站附近"
+
+    @classmethod
+    def describe_conditions(cls, district, category, party_size, budget, source, subtype=None, note="",
+                            prefs=None) -> str:
+        prefs = prefs or {}
+        if prefs.get("similar"):
+            where = f"和「{prefs['similar']}」類似"
+        elif prefs.get("near"):
+            where = cls.near_text(prefs)
+        else:
+            where = district or "不限地區"
+        parts = [
+            where,
+            (f"{category}・{subtype}" if subtype else category) if category else "不限類別",
+            f"{party_size} 人" if party_size else "人數不限",
+            f"每人 {budget} 元內" if budget else "預算不限",
+        ]
+        return f"🔎 搜尋條件：{'｜'.join(parts)}（{source}解析{'・' + note if note else ''}）"
+
+    @staticmethod
+    def price_text(r: dict) -> str:
+        # 價格區間是「多數人用餐的花費」，不是最低／最高消費
+        low, high = int(r["min_price"]), int(r["max_price"])
+        text = f"多數人花費 ${high} 以下 / 人" if low <= 1 else f"多數人花費 ${low} - ${high} / 人"
+        if r.get("budget_fit") == "partial":
+            text += "（⚠️ 可能超出預算）"
+        return text
+
+    def format_card(self, i: int, r: dict, reason: str, anchor: str = "") -> str:
+        lines = [
+            f"**{i}. {r['name']}**",
+            f"📍 {r['district']}・{r['category']}｜⭐ {r['rating']}"
+            f"（{int(r['user_ratings_total'] or 0):,} 則評論）｜💰 {self.price_text(r)}",
+        ]
+        if anchor and r.get("distance") is not None:
+            lines[1] += f"｜🚶 離{anchor}約 {int(r['distance']):,} 公尺"
+        if reason and self.valves.SHOW_REASONS:
+            lines.append(f"✨ {reason}")
+        lines.append(f"🏠 {r['address']}｜🗺️ [在 Google Maps 開啟]({r['maps_url']})")
+        return "\n".join(lines)
+
+    def pipe(self, body: dict) -> Union[str, Generator, Iterator]:
+        messages = body.get("messages", [])
+        if not messages:
+            return "無有效的對話訊息。"
+
+        user_text = messages[-1].get("content", "")
+        user_text = user_text if isinstance(user_text, str) else str(user_text)
+
+        # 1. 解析用戶條件
+        conditions, source, info = self.get_conditions(messages)
+        district, category, party_size, budget = conditions
+        total, subtype = info["total"], info["subtype"]
+
+        prefs = info["prefs"]
+        said = self.parse_prefs(user_text)  # 這一句提到的其他條件
+
+        # 問「有什麼類型可以選」→ 列出料理類型
+        if self.is_category_question(user_text) and not (said.get("near") or said.get("hidden_gem")):
+            return self.list_categories(conditions)
+
+        last_names = self.last_recommended(messages)
+        new_search = (any(self.parse_user_query(user_text))
+                      or self.detect_subtype(fix_homophones(user_text)[0], None)
+                      or any(k in said for k in ("near", "avoid", "want", "no_chain", "hidden_gem", "budget_min"))
+                      or self.find_similar(user_text, last_names))
+
+        # 推薦完之後問「你推薦哪一間？」→ 從剛剛那批挑一家
+        if last_names and not new_search and re.search(PICK_LAST_RE, user_text):
+            return self.pick_from_last(messages, user_text)
+
+        # 「不喜歡第 2 間」「吃過了」→ 找出是哪幾間
+        prev_msg = str(messages[-2].get("content", "")) if len(messages) >= 2 else ""
+        asked_which = prev_msg.startswith(f"{ASK_MARK}是哪一間呢")
+        rejects, reject_said = self.find_rejects(user_text, last_names, force=asked_which)
+        if prefs.get("similar") and prefs["similar"] in rejects:
+            rejects = [n for n in rejects if n != prefs["similar"]]  # 「跟第 2 間差不多」不是不要第 2 間
+            reject_said = False
+        if not rejects and info["intent"] == "reject":
+            rejects = info["reject"]
+        if reject_said and not rejects and last_names and not new_search:
+            if self.wants_more(user_text):
+                rejects = list(last_names)  # 「吃過了，換別的」→ 這批都不要
+            else:
+                return self.ask_which(last_names)
+
+        # 不是要新推薦（道謝、閒聊、問細節）→ LLM 自然回覆
+        if info["intent"] == "chat" and not rejects and not self.wants_more(user_text) and last_names:
+            reply = self.chat_reply(messages)
+            if reply:
+                return CHAT_MARK + reply
+
+        # 資訊不足 → 繼續反問
+        missing = self.should_ask(messages, conditions, total, prefs)
+        if missing:
+            return self.ask_question(messages, conditions, missing, total, subtype, prefs)
+
+        asked_none = re.match(rf"{ASK_MARK}資料庫裡沒有店名看得出是「(.+?)」", prev_msg)
+        if asked_none and subtype == asked_none.group(1):
+            subtype = None  # 使用者回「都可以」之類的 → 直接推薦一般的店
+
+        # 「推薦別的」→ 排除同樣條件下已經推薦過的店
+        condition_line = self.describe_conditions(district, category, party_size, budget, source, subtype,
+                                                  info["llm_note"], prefs)
+        extra_line = self.prefs_line(prefs)
+        more = self.wants_more(user_text) or info["intent"] == "more"
+        rejected = list(dict.fromkeys(self.rejected_history(messages) + rejects))
+        history = self.shown_restaurants(messages, condition_line, extra_line)
+        if self.find_similar(user_text, last_names):
+            # 「跟第 2 間差不多的」：剛剛那批都看過了，找別家
+            skipped = list(last_names)
+        elif more:
+            # 換一批：同條件下推薦過的都排除
+            skipped = history
+        elif rejects:
+            # 只換掉不喜歡的那幾間：保留目前這批，更早幾批的照樣不要再出現
+            skipped = [n for n in history if n not in last_names]
+        else:
+            skipped = []
+        shown = [n for n in skipped if n not in rejected]  # 不喜歡的另外用 🚫 列，不重複計算
+        exclude = list(dict.fromkeys(rejected + skipped))
+
+        # 2. 呼叫推薦 API
+        payload = {
+            "district": district,
+            "category": category,
+            "party_size": party_size,
+            "budget": budget,
+            "exclude": exclude,
+        }
+        if subtype:
+            parent, _, keywords, cross = SUBTYPES[subtype]
+            siblings = {name: [kw, cr] for name, (par, _, kw, cr) in SUBTYPES.items()
+                        if par == parent and name != subtype}
+            payload.update({"subtype": subtype, "subtype_keywords": keywords, "subtype_cross": cross,
+                            "subtype_siblings": siblings})
+        payload.update({
+            "near": prefs.get("near"),
+            "similar_to": prefs.get("similar"),
+            "categories": prefs.get("cats"),
+            "avoid_categories": prefs.get("avoid"),
+            "no_chain": bool(prefs.get("no_chain")),
+            "hidden_gem": bool(prefs.get("hidden_gem")),
+            "budget_min": prefs.get("budget_min"),
+            "top_n": 1 if prefs.get("pick_one") else 5,
+        })
+        try:
+            # 跟以前透過 HTTP 呼叫一樣，轉成 JSON 再轉回來（數字型別、NaN 處理都一致）
+            data = json.loads(json.dumps(service.handle_recommend(payload), ensure_ascii=False, default=str))
+        except Exception as e:
+            return f"❌ 推薦服務發生錯誤：{e}"
+
+        restaurants = data.get("restaurants", [])
+        where = self.near_text(prefs) if prefs.get("near") else district
+        overview = data.get("subtype_overview") or {}
+        if subtype and overview.get("total") == 0:
+            return self.ask_no_subtype(subtype, category, where, overview)
+        tips = self.describe_alternatives(conditions, len(restaurants), data.get("alternatives") or [], where)
+        if data.get("similar"):
+            # 「跟某間差不多」：顯示那家店的類別（下一句「推薦別的」會沿用）
+            category = data["similar"]["category"]
+            budget = budget or data["similar"].get("budget")
+            conditions = (district, category, party_size, budget)
+            condition_line = self.describe_conditions(district, category, party_size, budget, source, subtype,
+                                                      info["llm_note"], prefs)
+        banners = self.pref_banners(prefs, data, info, category, len(restaurants))
+        if not restaurants or "maps_url" not in restaurants[0]:
+            # 沒有結果，或 api.py 還是舊版：直接顯示 API 的文字
+            sections = []
+            if self.valves.SHOW_CONDITIONS:
+                sections.append(condition_line)
+                if extra_line:
+                    sections.append(extra_line)
+            sections += banners
+            if rejects:
+                sections.append(REJECTED_MARK + "".join(f"「{n}」" for n in rejects))
+            if more and shown:
+                sections.append(f"🔄 這個條件下的店都推薦過了（已推薦 {len(shown)} 家）。")
+            else:
+                sections.append(data.get("result", "沒有取得有效的推薦結果。"))
+            if tips:
+                sections.append(tips)
+            return "\n\n".join(sections)
+
+        # 3. 組合回答：條件 → 開場 → 每家餐廳（含推薦理由）
+        sections = []
+        if self.valves.SHOW_CONDITIONS:
+            sections.append(condition_line)
+            if extra_line:
+                sections.append(extra_line)
+        sections += banners
+        if total and party_size:
+            sections.append(f"🧮 總預算 {total} 元 ÷ {party_size} 人 ≈ 每人 {budget} 元")
+        if rejects:
+            sections.append(REJECTED_MARK + "".join(f"「{n}」" for n in rejects))
+        if more and shown:
+            sections.append(f"🔄 換一批：已排除先前推薦過的 {len(shown)} 家")
+        matched = data.get("matched", len(restaurants))
+        relaxed = data.get("relaxed_budget")
+        if budget and relaxed:
+            if matched == 0:
+                sections.append(f"⚠️ 沒有符合每人 {budget} 元預算的店，"
+                                f"以下把預算稍微放寬到每人約 {relaxed} 元來找。")
+            else:
+                sections.append(f"⚠️ 符合每人 {budget} 元預算的店只有 {matched} 家，"
+                                f"另外補上比預算稍微高一點（放寬到每人約 {relaxed} 元）的選擇。")
+        # 子類型：誠實說明哪些店看得出是這種、哪些只是一般同類別的店
+        matched_subtype = data.get("matched_subtype")
+        general = self.shop_label(category)  # 「一般的火鍋店」「一般的美式餐廳」
+        if subtype and matched_subtype is not None:
+            where = district or "台北"
+            shown_sub = sum(1 for r in restaurants if r.get("subtype_match"))
+            if shown_sub == 0 and exclude and matched_subtype == 0:
+                sections.append(f"⚠️ 店名看得出是「{subtype}」的店都推薦過了，"
+                                f"以下是一般的{general}，不一定有{subtype}。")
+            elif shown_sub == 0:
+                elsewhere = (f"（全台北有 {overview['total']} 家，想看可以說「不限地區」）"
+                             if overview.get("total") else "")
+                sections.append(f"⚠️ 資料庫裡找不到{where}店名看得出是「{subtype}」的店{elsewhere}，"
+                                f"以下先推薦一般的{general}，不一定有{subtype}。")
+            elif shown_sub < len(restaurants):
+                over_sub = sum(1 for r in restaurants if r.get("subtype_match") and r.get("budget_fit") == "over")
+                if over_sub == shown_sub:
+                    note = "（比預算稍微高一點）"
+                elif over_sub:
+                    note = f"（其中 {over_sub} 家比預算稍微高一點）"
+                else:
+                    note = ""
+                sections.append(f"🏷️ 店名看得出是「{subtype}」的有 {shown_sub} 家，排在最前面{note}；"
+                                f"後面是一般的{general}，不一定有{subtype}。")
+        # LLM 開場白：把上面的系統說明一起告訴 LLM，讓它自然地帶到
+        texts, _ = self.current_round(messages)
+        notes = [line for line in sections
+                 if line.startswith(("🚫", "🔄", "⚠️", "🏷️", "🧮", "✏️", "📏", "🏪", "🔍", "🔁", "👉", PREFS_MARK))]
+        intro, reasons = self.write_reasons(texts, conditions, restaurants, subtype, notes)
+        if intro:
+            sections.append(f"💬 {intro}")
+        blocks = []
+        for i, (r, reason) in enumerate(zip(restaurants, reasons), 1):
+            prev = restaurants[i - 2] if i > 1 else None
+            is_over = r.get("budget_fit") == "over"
+            # 子類型的店之後，接著是一般同類別的店 → 加分隔標題
+            if subtype and prev and prev.get("subtype_match") and not r.get("subtype_match"):
+                extra = "，比預算稍微高一點" if is_over else ""
+                blocks.append(f"🍽️ **以下是一般的{general}（店名看不出是不是{subtype}{extra}）**")
+            # 一般的店裡，預算內的店之後接著是比預算稍微高一點的店
+            elif (is_over and prev and prev.get("budget_fit") != "over"
+                  and not (subtype and r.get("subtype_match"))):
+                blocks.append(f"💸 **以下是比預算稍微高一點的選擇（放寬到每人約 {relaxed or '更高'} 元）**")
+            if data.get("similar"):
+                short = re.split(r"[\s｜|（(\-—－/／:：,，。]", data["similar"]["name"])[0][:10]
+                anchor = f"「{short}」"
+            else:
+                anchor = f"捷運{data['near']}站" if data.get("near") else ""
+            blocks.append(self.format_card(i, r, reason, anchor))
+        sections.append("\n\n---\n\n".join(blocks))
+        if tips:
+            sections.append(tips)
+        return "\n\n".join(sections)
+
+    def ask_no_subtype(self, subtype: str, category, where, overview: dict) -> str:
+        """整個資料庫都沒有這種子類型的店 → 先問使用者要改成什麼，不直接列一般的店。"""
+        general = self.shop_label(category)
+        place = where or "台北"
+        lines = [f"{ASK_MARK}資料庫裡沒有店名看得出是「{subtype}」的店（整個台北都找不到），"
+                 f"沒辦法確定哪家有{subtype}。要改成下面哪一種？", ""]
+        if overview.get("general"):
+            lines.append(f"- 「一般{general}」→ {place}有 {overview['general']} 家符合")
+        for name, n in (overview.get("siblings") or [])[:4]:
+            lines.append(f"- 「{name}」→ {place}有 {n} 家")
+        lines += ["", "直接回覆上面「」裡的說法就可以；想換別的類型也可以直接說。"]
+        return "\n".join(lines)
+
+    @staticmethod
+    def shop_label(category: Optional[str]) -> str:
+        """「火鍋」→「火鍋店」，「美式餐廳」「酒吧」本身就是店，不用再加「店」。"""
+        if not category:
+            return "餐廳"
+        return category if category.endswith(("餐廳", "店", "吧")) else category + "店"
+
+    def pref_banners(self, prefs: dict, data: dict, info: dict, category, found: int) -> list:
+        """其他條件的說明：錯字修正、附近範圍、排除連鎖、隱藏版、類似、只選一家、資料沒有的條件。"""
+        lines = []
+        if info.get("fixes"):
+            lines.append("✏️ " + "、".join(f"「{a}」看成「{b}」" for a, b in info["fixes"]))
+        if data.get("similar"):
+            s = data["similar"]
+            km = (data.get("radius") or 0) / 1000
+            lines.append(f"🔁 找和「{s['name']}」類似的店：同樣是{s['category']}、"
+                         f"距離它 {km:g} 公里內、每人 {s.get('budget')} 元內")
+        elif prefs.get("near") and data.get("near"):
+            if data.get("radius_relaxed"):
+                lines.append(f"📏 捷運{prefs['near']}站 {data.get('radius_first', 800)} 公尺內符合的店不到 5 家，"
+                             f"範圍放寬到 {data['radius'] / 1000:g} 公里。")
+        elif prefs.get("near"):
+            lines.append(f"⚠️ 推薦服務還沒有「捷運{prefs['near']}站」的座標（api.py 可能是舊版），先不限地區找。")
+        if prefs.get("no_chain") and data.get("chain_removed"):
+            lines.append(f"🏪 已排除 {data['chain_removed']} 家連鎖店（同一個品牌在資料裡有 2 家以上的店）")
+        if prefs.get("hidden_gem"):
+            note = f"符合的只有 {found} 家" if 0 < found < 5 else ""
+            lines.append("🔍 隱藏版：評分 4.3 以上、評論數比同區同類型一半的店少（但至少 50 則，評分才可靠）"
+                         + (f"，{note}" if note else ""))
+        if prefs.get("pick_one") and found:
+            lines.append("👉 只挑一家：綜合評分、評論數和預算，最推薦這間。")
+        if prefs.get("unsupported"):
+            items = "".join(f"「{u}」" for u in prefs["unsupported"])
+            lines.append(f"⚠️ 目前的資料沒有{items}的資訊，沒辦法幫你篩選，出發前請點 Google Maps 確認。")
+        return lines
+
+    @staticmethod
+    def describe_alternatives(conditions, found: int, alternatives: list, where_label=None) -> str:
+        """結果不到 5 家時，告訴使用者可以怎麼放寬條件。"""
+        if not alternatives:
+            return ""
+        district = conditions[0]
+        where = where_label or district or "目前條件下"
+        if found:
+            head = f"💡 {where}符合的只有 {found} 家（資料庫裡的店家數有限）。想看更多選擇，可以直接回覆："
+        else:
+            head = f"💡 {where}沒有符合的店。可以試試直接回覆："
+        lines = ["---", head]
+        for alt in alternatives:
+            lines.append(f"- 「{alt['reply']}」→ {alt['text']}")
+        return "\n".join(lines)
+

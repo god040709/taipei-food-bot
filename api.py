@@ -1,93 +1,76 @@
 """
-推薦 API
+推薦 API（機器人的大腦都在這裡，Open WebUI 的 pipe 只負責轉送）
 - 本機執行：python api.py                （http://127.0.0.1:5000）
 - 實驗室平台：HOST=0.0.0.0 python api.py   （讓 Open WebUI 容器連得到）
 沒有安裝 Flask 時，會自動改用 Python 內建的 http.server，不需要額外套件。
 
-POST /recommend   ：推薦餐廳
-POST /categories  ：各料理類型有幾家店（使用者問「有什麼類型可以選」時用）
+POST /chat        ：收到整段對話，回傳下一則回覆；需要 LLM 時請 pipe 代問（見 handle_chat）
+POST /recommend   ：推薦餐廳（給除錯、測試用）
+POST /categories  ：各料理類型有幾家店
+
+這個 API 不保存、也不使用任何 LLM 金鑰：需要問 LLM 時，會把要問的內容回傳給 pipe，
+由 pipe 用 Open WebUI 裡設定的金鑰去問。所以別人就算連到這個 API，也用不到任何人的 LLM 額度。
 """
 import json
 import os
 import sys
+import traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
-from src.recommender import (  # noqa: E402
-    category_counts, format_results, relaxations_for, search_restaurants, subtype_overview, to_records,
-)
+from bot import Bot  # noqa: E402
+from llm import NeedLLM, ReplayLLM  # noqa: E402
+from service import handle_categories, handle_recommend  # noqa: E402
 
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "5000"))
+PROTOCOL = 1  # pipe 和 API 之間的格式版本
 
 
-def handle_recommend(data: dict) -> dict:
-    conditions = dict(
-        district=data.get("district"),
-        category=data.get("category"),
-        party_size=data.get("party_size"),
-        budget=data.get("budget"),
-    )
-    exclude = data.get("exclude") or []  # 已經推薦過、這次要排除的店名
-    # 其他條件：捷運站附近、類似某間、多類別、不要的類別、不要連鎖、隱藏版、預算下限
-    opts = {k: data.get(k) for k in ("near", "similar_to", "categories", "avoid_categories",
-                                     "no_chain", "hidden_gem", "budget_min") if data.get(k)}
-    top_n = data.get("top_n") or 5
-    # subtype：子類型（例如「壽喜燒」），subtype_keywords：用來比對店名的關鍵字
-    results, error = search_restaurants(**conditions, exclude=exclude, top_n=top_n,
-                                        subtype=data.get("subtype"),
-                                        subtype_keywords=data.get("subtype_keywords") or [],
-                                        subtype_cross=bool(data.get("subtype_cross")),
-                                        opts=opts)
-    # 子類型的店家數：整個資料庫有沒有這種店、同類別其他子類型各有幾家（讓機器人誠實說明）
-    overview = {}
-    if data.get("subtype"):
-        overview = {"subtype_overview": subtype_overview(
-            conditions["category"], data.get("subtype_keywords") or [], bool(data.get("subtype_cross")),
-            data.get("subtype_siblings") or {}, conditions["district"], conditions["party_size"],
-            conditions["budget"], opts)}
-    if error:
-        return {"result": error, "restaurants": [], "matched": 0,
-                "alternatives": relaxations_for(**conditions, exclude=exclude, opts=opts), **overview}
-    # result：顯示用文字；restaurants：結構化資料，給 LLM 寫推薦理由
-    # matched：符合條件的餐廳總數；matched_within：價格完全在預算內的家數
-    # alternatives：結果太少時，放寬條件的建議
-    return {"result": format_results(results), "restaurants": to_records(results),
-            "matched": results.attrs.get("matched", len(results)),
-            "matched_within": results.attrs.get("matched_within", len(results)),
-            "alternatives": results.attrs.get("alternatives", []),
-            # relaxed_budget：符合預算的店不夠時，放寬到的預算（後面補上的店標示為 over）
-            "relaxed_budget": results.attrs.get("relaxed_budget"),
-            # matched_subtype：店名看得出是這個子類型的家數（沒有指定子類型時是 None）
-            "matched_subtype": results.attrs.get("matched_subtype"),
-            # near / radius / radius_relaxed：附近搜尋用的車站、範圍（公尺）、是否放寬過
-            # similar：「跟某間差不多」的參考店；chain_removed：排除了幾家連鎖店
-            **{k: results.attrs[k] for k in ("near", "radius", "radius_relaxed", "radius_first",
-                                             "similar", "chain_removed") if k in results.attrs},
-            **overview}
+def handle_chat(data: dict) -> dict:
+    """
+    請求：{"messages": [...], "llm_enabled": true, "llm_results": [...], "options": {...}}
+      llm_results：之前請 pipe 問 LLM 得到的答案，依序排列
+        [{"ok": true, "content": "...", "finish_reason": "stop"} 或 {"ok": false, "note": "連不到 LLM 服務"}]
+    回應：
+      {"type": "reply", "content": "給使用者看的回覆"}
+      {"type": "llm", "request": {...}, "llm_results": [...]}
+        → pipe 用 request 去問 LLM，把答案加到 llm_results 最後面，再呼叫一次 /chat
+    每次都從頭重跑，已經有的答案直接沿用（同樣的對話 + 同樣的答案 → 同樣的結果）。
+    """
+    llm = ReplayLLM(bool(data.get("llm_enabled")), data.get("llm_results") or [])
+    bot = Bot(llm, data.get("options") or {})
+    try:
+        content = bot.pipe({"messages": data.get("messages") or []})
+    except NeedLLM as need:
+        return {"type": "llm", "request": need.request, "llm_results": llm.results, "protocol": PROTOCOL}
+    except Exception as e:
+        traceback.print_exc()
+        return {"type": "reply", "content": f"❌ 機器人發生錯誤：{type(e).__name__}: {e}", "protocol": PROTOCOL}
+    return {"type": "reply", "content": content, "protocol": PROTOCOL}
 
 
-def handle_categories(data: dict) -> dict:
-    return {"categories": category_counts(
-        district=data.get("district"),
-        party_size=data.get("party_size"),
-        budget=data.get("budget"),
-    )}
-
-
-ROUTES = {"/recommend": handle_recommend, "/categories": handle_categories}
+ROUTES = {"/chat": handle_chat, "/recommend": handle_recommend, "/categories": handle_categories}
 
 try:
-    from flask import Flask, request, jsonify
+    from flask import Flask, Response, request
 
     app = Flask(__name__)
 
+    def _json(payload):
+        # 不用 jsonify：它會把 key 照字母排序，也會把中文轉成 \\uXXXX
+        return Response(json.dumps(payload, ensure_ascii=False), mimetype="application/json")
+
+    @app.route("/chat", methods=["POST"])
+    def chat():
+        return _json(handle_chat(request.json or {}))
+
     @app.route("/recommend", methods=["POST"])
     def recommend():
-        return jsonify(handle_recommend(request.json or {}))
+        return _json(handle_recommend(request.json or {}))
 
     @app.route("/categories", methods=["POST"])
     def categories():
-        return jsonify(handle_categories(request.json or {}))
+        return _json(handle_categories(request.json or {}))
 
     def run():
         app.run(host=HOST, port=PORT)
