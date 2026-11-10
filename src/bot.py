@@ -2,17 +2,19 @@
 台北美食推薦機器人的對話流程：理解需求 → 反問／排除／換一批 → 查餐廳 → 組合回覆。
 api.py 的 /chat 會呼叫這裡；Open WebUI 的 pipe 只負責把對話轉過來。
 """
+import hashlib
 import json
+import random
 import re
 from typing import Optional
 
 import service
 from lexicon import (  # 詞庫、提示詞、文字處理
     ASK_HINT_WORDS, ASK_MARK, BUDGET_FILLER, CATEGORIES, CATEGORY_QUESTION_RE, CATEGORY_SYNONYMS,
-    CHAT_MARK, CHAT_PROMPT, CN_INDEX, DISTRICTS, FIELDS, FIELD_SKIP_WORDS, LABELS, MORE_WORDS,
-    MRT_STATIONS, NEG_AFTER_RE, NEG_BEFORE_RE, NUM, PARSE_PROMPT, PERSON_PREFS, PREFS_MARK,
-    PREF_OFF_WORDS, QUESTIONS, REASON_PROMPT, REJECTED_MARK, REJECT_SOFT, REJECT_STRONG, SAY_PROMPT,
-    SKIP_WORDS, STYLE_WORDS, SUBTYPES, TOTAL_RE, find_near, fix_homophones, to_number,
+    CHAT_MARK, CHAT_PROMPT, CHOOSE_MARK, CN_INDEX, DISTRICTS, FIELDS, FIELD_SKIP_WORDS, LABELS,
+    MORE_WORDS, MRT_STATIONS, NEG_AFTER_RE, NEG_BEFORE_RE, NUM, PARSE_PROMPT, PERSON_PREFS,
+    PREFS_MARK, PREF_OFF_WORDS, QUESTIONS, REASON_PROMPT, REJECTED_MARK, REJECT_SOFT, REJECT_STRONG,
+    SAY_PROMPT, SKIP_WORDS, STYLE_WORDS, SUBTYPES, TOTAL_RE, find_near, fix_homophones, to_number,
 )
 from llm import LLMError
 
@@ -144,6 +146,8 @@ class Bot:
             "category": nullable("string", CATEGORIES),
             "party_size": nullable("integer"),
             "budget": nullable("integer"),
+            "waived": array(FIELDS),
+            "choose_category": nullable("boolean"),
             "reject": array(recent_names or None),
             "near": nullable("string"),
             "no_chain": nullable("boolean"),
@@ -175,8 +179,9 @@ class Bot:
                 # 推薦結果只留先前的條件，其餘省略
                 cond = re.search(r"🔎 搜尋條件：([^（\n]+)", content)
                 extra = next((l[len(PREFS_MARK):] for l in content.splitlines() if l.startswith(PREFS_MARK)), "")
+                picked = "；料理類型是你幫使用者挑的" if "🎲 幫你挑了" in content else ""
                 lines.append(f"助理：（推薦了餐廳；當時的條件是 {cond.group(1).strip() if cond else '未知'}"
-                             f"{'；其他條件：' + extra if extra else ''}）")
+                             f"{'；其他條件：' + extra if extra else ''}{picked}）")
 
         system = PARSE_PROMPT
         if recent_names:
@@ -200,6 +205,8 @@ class Bot:
         return {"district": district, "category": category,
                 "party_size": to_int(data.get("party_size")), "budget": to_int(data.get("budget")),
                 "intent": intent, "reject": [n for n in (data.get("reject") or []) if n in recent_names],
+                "waived": {f for f in (data.get("waived") or []) if f in FIELDS},
+                "choose_category": data.get("choose_category") is True,
                 "prefs": self.clean_llm_prefs(data, to_int)}
 
     @staticmethod
@@ -500,7 +507,8 @@ class Bot:
               prefs（其他條件）、fixes（同音錯字修正）、llm_note（LLM 沒用上的原因，顯示在條件行）。
         有 LLM 時以 LLM 為主；LLM 沒填的欄位用規則補上。總預算會除以人數，換算成每人預算。"""
         source = "規則"
-        info = {"intent": None, "reject": [], "llm_note": "", "llm_prefs": {}}
+        info = {"intent": None, "reject": [], "llm_note": "", "llm_prefs": {}, "llm_waived": set(),
+                "choose_category": False}
         texts, _ = self.current_round(messages)
         rules = list(self.parse_rounds(messages))
         conditions = rules
@@ -514,6 +522,9 @@ class Bot:
                 # LLM 沒填的欄位用規則補（例如 LLM 漏掉沿用的條件）。
                 # 「不限」只看使用者有沒有說「地區都可以」「預算不限」這類話（LLM 常把沒說不限的欄位也標成不限）
                 conditions = [lv if lv is not None else rv for lv, rv in zip(llm, rules)]
+                # LLM 說「不限」的欄位，只有在那一項本來就不知道時才採用（避免把已知的條件清掉）
+                info["llm_waived"] = {f for f, v in zip(FIELDS, conditions) if f in d["waived"] and v is None}
+                info["choose_category"] = d["choose_category"]
                 source = "LLM"
                 info.update(intent=d["intent"], reject=d["reject"], llm_prefs=d["prefs"])
             except LLMError as e:
@@ -533,6 +544,24 @@ class Bot:
             conditions = [None if (now is None and v == old) else v
                           for v, now, old in zip(conditions, said, previous)]
         info["new_request"] = new_request
+
+        # 「你幫我挑一種料理」：這一句說的，或這次需求的反問裡已經記下來的
+        asked_choose = False
+        for m in reversed(messages[:-1]):  # 往回看到上一次推薦為止（中間的反問、閒聊）
+            content = str(m.get("content", ""))
+            if m.get("role") != "assistant" or content.startswith(CHAT_MARK):
+                continue
+            if not content.startswith(ASK_MARK):
+                break
+            if CHOOSE_MARK in content:
+                asked_choose = True
+                break
+        said_category = any(self.parse_user_query(t)[1] for t in texts)
+        if (info["choose_category"] or asked_choose) and not said_category:
+            info["choose_category"] = True
+            conditions[1] = None  # 不用 LLM 自己挑的類別，等條件齊了由程式隨機挑
+        else:
+            info["choose_category"] = False
 
         fixed_texts = [fix_homophones(t)[0] for t in texts]
         info["fixes"] = fix_homophones(texts[-1])[1] if texts else []
@@ -628,7 +657,7 @@ class Bot:
             done.add("budget")
         return done
 
-    def should_ask(self, messages: list, conditions, total=None, prefs=None) -> list:
+    def should_ask(self, messages: list, conditions, total=None, prefs=None, more_waived=None) -> list:
         """回傳還要問的欄位；空 list 代表資訊足夠，可以推薦。"""
         if not self.valves.ASK_FOLLOWUP:
             return []
@@ -637,13 +666,19 @@ class Bot:
             return []
         if asks >= self.valves.MAX_ASK:
             return []  # 已經問很多次了，用目前的條件推薦
-        waived = self.waived_fields(texts) | self.answered_by_prefs(prefs)
+        waived = self.waived_fields(texts) | self.answered_by_prefs(prefs) | set(more_waived or ())
         if total:
             waived.add("budget")  # 已經有總預算，問到人數就能換算
         return [f for f, v in zip(FIELDS, conditions) if v is None and f not in waived]
 
     def ask_question(self, messages: list, conditions, missing: list, total=None, subtype=None,
-                     prefs=None) -> str:
+                     prefs=None, choose=False) -> str:
+        """缺條件時反問。choose：使用者要機器人挑料理類型（不問類型，並記在最後一行）。"""
+        text = self._ask_question(messages, conditions, missing, total, subtype, prefs, choose)
+        return text + ("\n\n" + CHOOSE_MARK if choose else "")
+
+    def _ask_question(self, messages: list, conditions, missing: list, total=None, subtype=None,
+                      prefs=None, choose=False) -> str:
         texts, asks = self.current_round(messages)
         waived = self.waived_fields(texts)
         prefs = prefs or {}
@@ -669,6 +704,7 @@ class Bot:
                 "已經知道的不要再問。可以順便讓使用者知道，不在意的項目說不限就好。",
                 [f"使用者剛剛說：「{texts[-1]}」" if texts else "",
                  f"目前已知：{'、'.join(known + ([extra] if extra else [])) or '還沒有'}",
+                 "料理類型使用者要你幫他挑，等條件齊了你會挑，這次不用問類型" if choose else "",
                  f"還需要問：{'；'.join(asked)}",
                  f"這是第 {asks + 1} 次追問，不要再打招呼" if asks else ""])
             if text:
@@ -990,15 +1026,24 @@ class Bot:
 
         # 不是要新推薦（問你會做什麼、道謝、閒聊、問細節）→ LLM 自然回覆。
         # 這句話有提到任何條件就當成找餐廳，避免把需求誤判成閒聊
-        if info["intent"] == "chat" and not rejects and not self.wants_more(user_text) and not new_search:
+        if info["intent"] == "chat" and not rejects and not self.wants_more(user_text) and not new_search \
+                and not info["choose_category"]:  # 「你幫我挑一種料理」是要找餐廳，不是閒聊
             reply = self.chat_reply(messages)
             if reply:
                 return CHAT_MARK + reply
 
         # 資訊不足 → 繼續反問
-        missing = self.should_ask(messages, conditions, total, prefs)
+        more_waived = info["llm_waived"] | ({"category"} if info["choose_category"] else set())
+        missing = self.should_ask(messages, conditions, total, prefs, more_waived)
         if missing:
-            return self.ask_question(messages, conditions, missing, total, subtype, prefs)
+            return self.ask_question(messages, conditions, missing, total, subtype, prefs,
+                                     info["choose_category"])
+
+        # 「你幫我挑一種料理」：條件齊了，從目前條件下有店的類別隨機挑一種
+        picked = None
+        if info["choose_category"] and category is None:
+            picked = category = self.pick_category(messages, conditions, prefs)
+            conditions = (district, category, party_size, budget)
 
         # 上一則問過「資料庫沒有這種店，要改成哪一種？」，這次沒有選別的子類型（例如回「都可以」）
         # → 推薦一般的店，不再問一次
@@ -1085,6 +1130,8 @@ class Bot:
             if extra_line:
                 sections.append(extra_line)
         sections += banners
+        if picked:
+            sections.append(f"🎲 幫你挑了「{picked}」，想換一種可以再跟我說")
         if total and party_size:
             sections.append(f"🧮 總預算 {total} 元 ÷ {party_size} 人 ≈ 每人 {budget} 元")
         if rejects:
@@ -1127,7 +1174,7 @@ class Bot:
         # LLM 開場白：把上面的系統說明一起告訴 LLM，讓它自然地帶到
         texts, _ = self.current_round(messages)
         notes = [line for line in sections
-                 if line.startswith(("🚫", "🔄", "⚠️", "🏷️", "🧮", "✏️", "📏", "🏪", "🔍", "🆕", PREFS_MARK))]
+                 if line.startswith(("🚫", "🔄", "⚠️", "🏷️", "🧮", "✏️", "📏", "🏪", "🔍", "🆕", "🎲", PREFS_MARK))]
         intro, reasons = self.write_reasons(texts, conditions, restaurants, subtype, notes)
         if intro:
             sections.append(f"💬 {intro}")
@@ -1149,6 +1196,22 @@ class Bot:
         if tips:
             sections.append(tips)
         return "\n\n".join(sections)
+
+    def pick_category(self, messages: list, conditions, prefs: dict) -> Optional[str]:
+        """隨機挑一種料理：只從目前地區、預算下有店的類別挑，避開不要的類別和上一次的類別。
+        用對話內容當亂數種子：同一則訊息重跑時（API 每次都從頭跑）會挑到同一種。"""
+        district, _, party_size, budget = conditions
+        counts = {c["category"]: c["count"] for c in service.handle_categories(
+            {"district": None if prefs.get("near") else district, "party_size": party_size,
+             "budget": budget}).get("categories", [])}
+        previous = (self.previous_conditions(messages) or [None, None])[1]
+        avoid = set(prefs.get("avoid", [])) | {previous}
+        candidates = sorted(c for c in CATEGORIES if counts.get(c, 0) >= 5 and c not in avoid) \
+            or sorted(c for c in CATEGORIES if counts.get(c, 0) and c not in avoid) \
+            or [c for c in CATEGORIES if c not in avoid]
+        seed = hashlib.md5(json.dumps([m.get("content") for m in messages], ensure_ascii=False,
+                                      default=str).encode("utf-8")).hexdigest()
+        return random.Random(seed).choice(candidates)
 
     def ask_no_subtype(self, subtype: str, category, where, overview: dict) -> str:
         """整個資料庫都沒有這種子類型的店 → 先問使用者要改成什麼，不直接列一般的店。"""
