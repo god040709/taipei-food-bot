@@ -1395,13 +1395,15 @@ class Bot:
             sections.append(f"🔄 換一批：已排除先前推薦過的 {len(shown)} 家")
         matched = data.get("matched", len(restaurants))
         relaxed = data.get("relaxed_budget")
+        # 放寬到原本預算的兩倍以內才說「稍微」（例如 50 元放寬到 450 元就不算稍微）
+        over_label = "比預算稍微高一點" if budget and relaxed and relaxed <= budget * 2 else "超出預算"
         if budget and relaxed:
             if matched == 0:
                 sections.append(f"⚠️ 沒有符合每人 {budget} 元預算的店，"
-                                f"以下把預算稍微放寬到每人約 {relaxed} 元來找。")
+                                f"以下是{over_label}（放寬到每人約 {relaxed} 元）的選擇。")
             else:
                 sections.append(f"⚠️ 符合每人 {budget} 元預算的店只有 {matched} 家，"
-                                f"另外補上比預算稍微高一點（放寬到每人約 {relaxed} 元）的選擇。")
+                                f"另外補上{over_label}（放寬到每人約 {relaxed} 元）的選擇。")
         # 子類型：誠實說明哪些店看得出是這種、哪些只是一般同類別的店
         matched_subtype = data.get("matched_subtype")
         general = self.shop_label(category)  # 「一般的火鍋店」「一般的美式餐廳」
@@ -1453,7 +1455,7 @@ class Bot:
             # 一般的店裡，預算內的店之後接著是比預算稍微高一點的店
             elif (is_over and prev and prev.get("budget_fit") != "over"
                   and not (subtype and r.get("subtype_match"))):
-                blocks.append(f"💸 **以下是比預算稍微高一點的選擇（放寬到每人約 {relaxed or '更高'} 元）**")
+                blocks.append(f"💸 **以下是{over_label}的選擇（放寬到每人約 {relaxed or '更高'} 元）**")
             anchor = f"捷運{data['near']}站" if data.get("near") else ""
             blocks.append(self.format_card(i, r, reason, anchor))
         sections.append("\n\n---\n\n".join(blocks))
