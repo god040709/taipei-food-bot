@@ -385,17 +385,32 @@ class Pipe:
 
     def parse_with_llm_full(self, messages: list, recent_names: list) -> dict:
         """用 LLM 解析條件、意圖（search/more/reject/chat）與不喜歡的店。"""
-        history = []
+        # 把對話整理成「一段文字」交給 LLM，而不是原樣當成多輪對話：
+        # 否則模型會模仿助理先前的回答（「🔎 搜尋條件：…」），不回 JSON。
+        lines = []
         for m in messages[-12:]:
             content = m.get("content", "")
-            if isinstance(content, str) and m.get("role") in ("user", "assistant"):
-                # 助理的長篇回答只保留開頭（含先前解析的條件），節省 token
-                history.append({"role": m["role"], "content": content[:300]})
+            role = m.get("role")
+            if not isinstance(content, str) or role not in ("user", "assistant"):
+                continue
+            if role == "user":
+                lines.append(f"使用者：{content[:300]}")
+            elif content.startswith(ASK_MARK):
+                lines.append(f"助理（反問）：{content[:200]}")
+            elif content.startswith(CHAT_MARK):
+                lines.append(f"助理（閒聊）：{content[len(CHAT_MARK):][:150]}")
+            else:
+                # 推薦結果只留先前的條件，其餘省略
+                cond = re.search(r"🔎 搜尋條件：([^（\n]+)", content)
+                lines.append(f"助理：（推薦了餐廳；當時的條件是 {cond.group(1).strip() if cond else '未知'}）")
 
         system = PARSE_PROMPT
         if recent_names:
             system += "\n最近推薦過的店：\n" + "\n".join(f"{i}. {n}" for i, n in enumerate(recent_names, 1))
-        raw = self._chat([{"role": "system", "content": system}] + history, max_tokens=800)
+        user = ("以下是對話紀錄，最後一行是使用者這次說的話：\n\n" + "\n".join(lines)
+                + "\n\n請依規則只輸出 JSON 物件，第一個字元必須是 {。")
+        raw = self._chat([{"role": "system", "content": system}, {"role": "user", "content": user}],
+                         max_tokens=800)
         data = self._extract_json(raw)
 
         district = data.get("district")
