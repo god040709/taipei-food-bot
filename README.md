@@ -77,7 +77,7 @@ curl -s -X POST localhost:5000/recommend -H "Content-Type: application/json" \
 |---|---|---|
 | Api Url | 預設即可（`http://127.0.0.1:5000/recommend`） | `http://testbed:5000/recommend` |
 | Llm Api Key | 選填 | 實驗室 `.env` 裡的 `LLM_API_KEY` |
-| Llm Model | 選填 | `Qwen3.5-35B-A3B` |
+| Llm Model | 選填 | `Qwen3.6-35B-A3B`（以管理者提供的名稱為準；留空會自動用服務上的第一個模型） |
 
 4. 新增對話，模型選這個 Pipe，輸入「大安燒肉 兩個人 預算800」測試
 
