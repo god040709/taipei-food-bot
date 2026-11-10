@@ -853,7 +853,7 @@ class Bot:
                 [
                     {"role": "system", "content": REASON_PROMPT},
                     {"role": "user", "content": f"使用者需求：{need}\n條件：{cond}\n"
-                                                f"補充說明：{'；'.join(notes or []) or '無'}\n\n"
+                                                "\n"
                                                 f"餐廳資料：{json.dumps(data, ensure_ascii=False)}"},
                 ],
                 max_tokens=900, schema=schema,
@@ -1147,10 +1147,9 @@ class Bot:
             lines.append(f"⚠️ 推薦服務還沒有「捷運{prefs['near']}站」的座標（api.py 可能是舊版），先不限地區找。")
         if prefs.get("no_chain") and data.get("chain_removed"):
             lines.append(f"🏪 已排除 {data['chain_removed']} 家連鎖店（同一個品牌在資料裡有 2 家以上的店）")
-        if prefs.get("hidden_gem"):
-            note = f"符合的只有 {found} 家" if 0 < found < 5 else ""
-            lines.append("🔍 隱藏版：評分 4.3 以上、評論數比同區同類型一半的店少（但至少 50 則，評分才可靠）"
-                         + (f"，{note}" if note else ""))
+        if prefs.get("hidden_gem") and 0 < found < 5:
+            # 定義已經寫在「🎛️ 其他條件：隱藏版（評分高、評論數較少）」，這裡只在家數不夠時說明
+            lines.append(f"🔍 符合隱藏版的店只有 {found} 家")
         if prefs.get("unsupported"):
             items = "".join(f"「{u}」" for u in prefs["unsupported"])
             lines.append(f"⚠️ 目前的資料沒有{items}的資訊，沒辦法幫你篩選，出發前請點 Google Maps 確認。")
