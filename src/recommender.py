@@ -165,7 +165,9 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
         categories：多個類別（「日式或韓式都可以」）
         avoid_categories：不要的類別（「剛吃過拉麵」）
         no_chain：不要連鎖店；hidden_gem：隱藏版；budget_min：每人預算下限
-        sort：price_high（最貴的在前）、price_low（最便宜的在前），同價位再看推薦指數
+        sort：price_high（最貴的在前）、price_low（最便宜的在前）、near_first（近的在前）、
+              rating（評分可信度高的在前）、popularity（評論數多的在前），同樣時再看推薦指數
+        relax：["distance"] → 附近搜尋直接用最大範圍
         pin：要保留、排在最前面的店名（「換一批，但第 1 間留著」）"""
     if not os.path.exists(DF_PATH):
         return None, f"❌ 找不到資料庫檔案：{DF_PATH}，請確認是否已執行採集腳本。"
@@ -182,11 +184,15 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     if opts.get("near"):
         point = load_stations().get(opts["near"])
         if point:
-            center, steps = point, NEAR_STEPS
+            # 「走遠一點沒關係」→ 直接用最大範圍
+            center, steps = point, NEAR_STEPS[-1:] if "distance" in (opts.get("relax") or []) else NEAR_STEPS
             district = None
             info["near"] = opts["near"]
     if exclude:
-        all_df = all_df[~all_df["name"].isin(exclude)]
+        # 推薦過、不喜歡的店：同品牌的其他分店也不要（要保留的店除外）
+        brands = set(all_df.loc[all_df["name"].isin(exclude), "brand"]) - {""}
+        drop = all_df["name"].isin(exclude) | all_df["brand"].isin(brands)
+        all_df = all_df[~drop | all_df["name"].isin(opts.get("pin") or [])]
     if center:
         all_df = all_df.copy()
         all_df["distance"] = distance_m(all_df, *center)
@@ -274,8 +280,21 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
         df = df.sort_values(by=["_pin", "_sub_order", "_over", "_far", "_price", "score"],
                             ascending=[True, True, True, True, opts["sort"] == "price_low", False])
     else:
-        df = df.sort_values(by=["_pin", "_sub_order", "_over", "_far", "_fit_order", "_over_order", "score"],
-                            ascending=[True, True, True, True, True, True, False])
+        # 使用者強調的重點：在同一種預算等級裡，依那一項排（越近越好要有車站才算得出距離）
+        key = {"near_first": ("distance", True) if center else None, "rating": ("s_rating", False),
+               "popularity": ("user_ratings_total", False)}.get(opts.get("sort"))
+        by = ["_pin", "_sub_order", "_over", "_far", "_fit_order", "_over_order"] + ([key[0]] if key else [])
+        df = df.sort_values(by=by + ["score"],
+                            ascending=[True] * 6 + ([key[1]] if key else []) + [False])
+    # 同品牌只留一家：有車站時留最近的，沒有時留評分可信度最高的
+    # （要保留的店、店名符合子類型的、預算內的優先）
+    branded = df[df["brand"] != ""]
+    if branded["brand"].duplicated().any():
+        pick = branded.sort_values(by=["_pin", "_sub_order", "_over", "distance" if center else "s_rating"],
+                                   ascending=[True, True, True, bool(center)], kind="mergesort")
+        keep = pick.drop_duplicates("brand")["place_id"]
+        df = df[(df["brand"] == "") | df["place_id"].isin(keep)]
+        matched = int((df["budget_fit"] != "over").sum())  # 符合原本條件的家數（不算重複的分店）
     cats = opts.get("categories") or []
     if len(cats) >= 2 and not opts.get("sort"):
         # 多個類別（「日式或韓式都可以」）：各類別輪流排，不會整批都是同一種
