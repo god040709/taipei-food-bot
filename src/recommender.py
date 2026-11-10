@@ -27,8 +27,10 @@ W_BUDGET = 0.15     # 預算吻合度
 # 貝氏平均的門檻：評論數少於這個數字時，評分會被拉向全體平均
 BAYES_M = 100
 
-# 符合預算的店不夠時，預算依序放寬到這些倍數（找到足夠的店就停）
-RELAX_STEPS = (1.2, 1.5, 2.0)
+# 預算的一個級距（價格大多以 200 元為一級）。使用者說要多花一點就加一級；
+# 符合預算的店不夠時，依序加 1、2、3 級來補（找到足夠的店就停）
+BUDGET_STEP = 200
+RELAX_STEPS = (1, 2, 3)
 
 # 從店名看得出來的特色
 NAME_KEYWORDS = {
@@ -224,12 +226,12 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
     # 符合的不到 top_n 家：預算一點一點往上加，補上「稍微超過預算」的店
     relaxed_budget = None
     if budget and matched < top_n:
-        for factor in RELAX_STEPS:
-            cap = int(math.ceil(budget * factor / 50) * 50)
+        for step in RELAX_STEPS:
+            cap = budget + BUDGET_STEP * step
             extra = apply_filters(all_df, district, category, party_size, cap, cross_kw, opts)
             extra = extra[~extra["place_id"].isin(df["place_id"])]
             relaxed_budget = cap
-            if matched + len(extra) >= top_n or factor == RELAX_STEPS[-1]:
+            if matched + len(extra) >= top_n or step == RELAX_STEPS[-1]:
                 break
         if len(extra):
             extra = extra.copy()
@@ -240,8 +242,8 @@ def search_restaurants(district=None, category=None, party_size=None, budget=Non
 
     # 有指定子類型、但預算內沒有這種店：預算一點一點往上加，找看看有沒有稍微超過預算的
     if budget and kw and not name_matches(df, kw).any():
-        for factor in RELAX_STEPS:
-            cap = int(math.ceil(budget * factor / 50) * 50)
+        for step in RELAX_STEPS:
+            cap = budget + BUDGET_STEP * step
             extra = apply_filters(all_df, district, category, party_size, cap, cross_kw, opts)
             extra = extra[name_matches(extra, kw) & ~extra["place_id"].isin(df["place_id"])]
             if len(extra):
@@ -451,8 +453,8 @@ def suggest_relaxations(df, district, category, party_size, budget, shown=0, opt
         if n > current:
             options.append({"reply": "不限地區", "text": f"全台北有 {n} 家符合", "count": n})
     if budget:
-        for factor in (1.5, 2, 3):
-            new_budget = int(math.ceil(budget * factor / 100) * 100)
+        for step in range(1, 11):  # 一級一級往上加（最多 +2000），找到能多出店家的金額
+            new_budget = budget + BUDGET_STEP * step
             n = count(budget=new_budget)
             if n > current:
                 options.append({"reply": f"預算 {new_budget}", "text": f"{where}有 {n} 家符合", "count": n})

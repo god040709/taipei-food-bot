@@ -9,12 +9,13 @@ import re
 from typing import Optional
 
 import service
+from recommender import BUDGET_STEP  # 預算的一個級距（200 元）
 from lexicon import (  # 詞庫、提示詞、文字處理
-    ASK_HINT_WORDS, ASK_MARK, BUDGET_FILLER, CATEGORIES, CATEGORY_QUESTION_RE, CATEGORY_SYNONYMS,
-    CHAT_MARK, CHAT_PROMPT, CHOOSE_MARK, CN_INDEX, DISTRICTS, FIELDS, FIELD_SKIP_WORDS, LABELS,
+    ASK_HINT_WORDS, ASK_MARK, BUDGET_FILLER, BUDGET_UP_WORDS, CATEGORIES, CATEGORY_QUESTION_RE, CATEGORY_SYNONYMS,
+    CHAT_MARK, CHAT_PROMPT, CHOOSE_MARK, CN_INDEX, DEBUG_MARK, DISTRICTS, FIELDS, FIELD_SKIP_WORDS, LABELS,
     MORE_WORDS, MRT_STATIONS, NEAR_ASK_MARK, NEG_AFTER_RE, NEW_REQUEST_MARK, NEG_BEFORE_RE, NUM, PARSE_PROMPT, PERSON_PREFS,
     PREFS_MARK, PREF_OFF_WORDS, QUESTIONS, REASON_PROMPT, REJECTED_MARK, REJECT_SOFT, REJECT_STRONG,
-    RELAX_BUDGET, RELAX_LABELS, RESET_MARK, RESET_WORDS, SAY_PROMPT, SKIP_WORDS, SORTS, SORT_LABELS, STYLE_WORDS, SUBTYPES,
+    RELAXES, RELAX_LABELS, RESET_MARK, RESET_WORDS, SAY_PROMPT, SKIP_WORDS, SORTS, SORT_LABELS, STYLE_WORDS, SUBTYPES,
     TOTAL_RE, UNSURE_WORDS, find_near, fix_homophones, to_number,
 )
 from llm import LLMError
@@ -39,6 +40,7 @@ class Options:
     ASK_FOLLOWUP = True     # 資訊不足時持續反問，直到地區、類型、人數、預算都清楚
     MAX_ASK = 4             # 同一個需求最多反問幾次（避免一直問不完）
     SHOW_REASONS = True     # 在每家餐廳附上推薦理由
+    DEBUG = False           # 除錯模式：回覆最後附上「🔧 除錯資訊」
 
     def __init__(self, values: Optional[dict] = None):
         for key, value in (values or {}).items():
@@ -53,6 +55,7 @@ class Bot:
     def __init__(self, llm, options: Optional[dict] = None):
         self.llm = llm
         self.valves = Options(options)
+        self.trace = {}  # 除錯模式用：這次回覆每一步的結果
 
     # ------------------------------------------------------------------
     # LLM 呼叫
@@ -171,7 +174,7 @@ class Bot:
             "hidden_gem": nullable("boolean"),
             "budget_min": nullable("integer"),
             "sort": nullable("string", SORTS),
-            "relax": array(RELAX_LABELS),
+            "relax": array(RELAXES),
             "avoid_categories": array(CATEGORIES),
             "categories": array(CATEGORIES),
             "unsupported": array(),
@@ -209,6 +212,7 @@ class Bot:
         raw = self._chat([{"role": "system", "content": system}, {"role": "user", "content": user}],
                          max_tokens=800, schema=self.parse_schema(recent_names))
         data = self._extract_json(raw)
+        self.trace["llm_raw"] = data
 
         def to_int(v):
             try:
@@ -249,7 +253,7 @@ class Bot:
             p["budget_min"] = to_int(data.get("budget_min"))
         if data.get("sort") in SORTS:
             p["sort"] = data["sort"]
-        relax = [r for r in RELAX_LABELS if r in as_list(data.get("relax"))]
+        relax = [r for r in RELAXES if r in as_list(data.get("relax"))]
         if relax:
             p["relax"] = relax
         avoid = [c for c in as_list(data.get("avoid_categories")) if c in CATEGORIES]
@@ -504,8 +508,6 @@ class Bot:
             prefs["sort"] = llm_prefs["sort"]  # 強調的重點只有一個，以最新的說法為準
         if llm_prefs.get("relax"):
             prefs["relax"] = [r for r in RELAX_LABELS if r in prefs.get("relax", []) + llm_prefs["relax"]]
-        if llm_prefs.get("sort") == "price_low":
-            prefs["relax"] = [r for r in prefs.get("relax", []) if r != "budget"]  # 改說越便宜越好
         if not prefs.get("near"):
             prefs["relax"] = [r for r in prefs.get("relax", []) if r != "distance"]  # 沒有車站，談不上距離
         if llm_prefs.get("cats"):
@@ -580,12 +582,27 @@ class Bot:
             try:
                 d = self.parse_with_llm_full(messages, self.last_recommended(messages))
                 llm = [d["district"], d["category"], d["party_size"], d["budget"]]
+                self.trace.update(llm=d, rules=rules)
                 # LLM 沒填的欄位用規則補（例如 LLM 漏掉沿用的條件）。
                 # 「不限」只看使用者有沒有說「地區都可以」「預算不限」這類話（LLM 常把沒說不限的欄位也標成不限）
                 conditions = [lv if lv is not None else rv for lv, rv in zip(llm, rules)]
-                # 使用者強調重點或說可以放寬時，LLM 常順手把預算 ×1.3 或 ×0.7 → 預算用規則讀到的
-                if (d["prefs"].get("sort") or d["prefs"].get("relax")) and rules[3]:
+                # 「預算再高一點」「貴一點沒差」→ 預算 +200（說幾次加幾次，條件行看得到）。
+                # LLM 常把前面說過的放寬再填一次，這句話真的有提到才算
+                last_text = texts[-1] if texts else ""
+                raise_budget = "budget" in d["prefs"].get("relax", []) \
+                    and any(w in last_text for w in BUDGET_UP_WORDS)
+                # 使用者強調重點或說要加預算時，LLM 常順手把預算 ×1.3 或 ×0.7 → 預算用規則讀到的
+                if (d["prefs"].get("sort") or "distance" in d["prefs"].get("relax", []) or raise_budget) \
+                        and rules[3]:
+                    if conditions[3] != rules[3]:
+                        self.note(f"預算用規則讀到的 {rules[3]}（LLM 填了 {conditions[3]}；"
+                                  "說了強調或加預算時，LLM 常順手改預算）")
                     conditions[3] = rules[3]
+                if "budget" in d["prefs"].get("relax", []) and not raise_budget:
+                    self.note("LLM 判斷要加預算，但這句話沒有提到，不採用（多半是抄前面說過的）")
+                if raise_budget and conditions[3]:
+                    self.note(f"加預算：{conditions[3]} + {BUDGET_STEP}")
+                    conditions[3] += BUDGET_STEP
                 # LLM 說「不限」的欄位，只有在那一項本來就不知道時才採用（避免把已知的條件清掉）
                 unsure = any(w in (texts[-1] if texts else "") for w in UNSURE_WORDS)
                 info["llm_waived"] = set() if unsure else                     {f for f, v in zip(FIELDS, conditions) if f in d["waived"] and v is None}
@@ -687,6 +704,7 @@ class Bot:
                 category, subtype = None, None
         conditions = (district, category, party_size, budget)
         info.update(total=total, subtype=subtype, prefs=prefs)
+        self.trace.update(source=source, final=conditions, prefs=prefs, llm_note=info["llm_note"])
         return conditions, source, info
 
     # ------------------------------------------------------------------
@@ -1096,6 +1114,78 @@ class Bot:
         return "\n".join(lines)
 
     def pipe(self, body: dict) -> str:
+        # 之前回覆裡的除錯區塊不算對話內容（不然會被讀成條件、或被 LLM 模仿）
+        messages = [{**m, "content": m["content"].split(DEBUG_MARK)[0].rstrip()}
+                    if isinstance(m.get("content"), str) and DEBUG_MARK in m["content"] else m
+                    for m in body.get("messages", [])]
+        self.trace = {}
+        reply = self._pipe({**body, "messages": messages})
+        return reply + self.debug_block(reply) if self.valves.DEBUG else reply
+
+    def note(self, text: str):
+        """除錯模式：記下程式整理時做了什麼調整。"""
+        self.trace.setdefault("notes", []).append(text)
+
+    @staticmethod
+    def pref_texts(prefs: dict) -> list:
+        """除錯模式：其他條件寫成中文（「強調＝評價優先」「不要連鎖」）。"""
+        names = {"near": "捷運站", "budget_min": "預算下限", "avoid": "不要的類別", "cats": "多類別",
+                 "unsupported": "資料沒有的條件", "budget_max": "預算上限"}
+        out = []
+        for k, v in prefs.items():
+            if k == "sort":
+                out.append(f"強調＝{SORT_LABELS[v]}")
+            elif k == "relax":
+                out.append("放寬＝" + "、".join({"distance": "距離", "budget": "加預算"}[r] for r in v))
+            elif k in ("no_chain", "hidden_gem") and isinstance(v, bool):
+                out.append({"no_chain": "不要連鎖", "hidden_gem": "隱藏版"}[k] + ("" if v else "（取消）"))
+            elif k in names:
+                out.append(f"{names[k]}＝{'、'.join(map(str, v)) if isinstance(v, list) else v}")
+        return out
+
+    def debug_block(self, reply: str) -> str:
+        """回覆最後的「🔧 除錯資訊」（Open WebUI 會顯示成可以收合的區塊）。"""
+        t = self.trace
+        fmt = lambda v: "不限" if v in (None, "", []) else ("、".join(map(str, v)) if isinstance(v, list) else str(v))
+        names = ("地區", "類型", "人數", "預算")
+        lines = []
+        d = t.get("llm")
+        if d:
+            lines.append("**① LLM 理解**：意圖＝" + d["intent"] + "｜"
+                         + "｜".join(f"{n}＝{fmt(d[f])}" for n, f in zip(names, FIELDS))
+                         + "".join(f"｜{x}" for x in self.pref_texts(d["prefs"])))
+        else:
+            lines.append(f"**① LLM 理解**：沒有使用 LLM（{t.get('llm_note') or '未開啟'}），全部用規則解析")
+        if "final" in t:
+            parts = []
+            llm_values = [d[f] for f in FIELDS] if d else [None] * 4
+            for n, lv, rv, fv in zip(names, llm_values, t.get("rules") or [None] * 4, t["final"]):
+                if not d:
+                    parts.append(f"{n}＝{fmt(fv)}")
+                elif lv == fv:
+                    parts.append(f"{n}＝{fmt(fv)}（LLM）")
+                elif rv == fv and fv is not None:
+                    parts.append(f"{n}＝{fmt(fv)}（規則）")
+                else:
+                    parts.append(f"{n}＝{fmt(fv)}（LLM {fmt(lv)}、規則 {fmt(rv)}，程式調整）")
+            lines.append("**② 程式整理**：" + "｜".join(parts + self.pref_texts(t.get("prefs") or {})))
+            lines += [f"　・{n}" for n in t.get("notes", [])]
+        if reply.startswith(CHAT_MARK):
+            lines.append("**決定**：閒聊，由 LLM 回覆")
+        elif reply.startswith(ASK_MARK):
+            missing = [LABELS[f] for f in t.get("missing") or []]
+            lines.append("**決定**：反問" + (f"（還缺：{'、'.join(missing)}）" if missing else ""))
+        if "query" in t:
+            payload, data = t["query"]
+            sent = {k: v for k, v in payload.items() if v not in (None, False, [], "") and k != "exclude"}
+            lines.append(f"**③ 查詢**：{json.dumps(sent, ensure_ascii=False)}"
+                         f"｜排除 {len(payload.get('exclude') or [])} 家（推薦過、不喜歡）"
+                         f"｜符合 {data.get('matched', 0)} 家，顯示 {len(data.get('restaurants') or [])} 家")
+        if t.get("llm_raw") is not None:
+            lines.append("**LLM 原始回傳**：\n```json\n" + json.dumps(t["llm_raw"], ensure_ascii=False) + "\n```")
+        return f"\n\n{DEBUG_MARK}\n\n" + "\n\n".join(lines) + "\n\n</details>"
+
+    def _pipe(self, body: dict) -> str:
         messages = body.get("messages", [])
         if not messages:
             return "無有效的對話訊息。"
@@ -1178,6 +1268,7 @@ class Bot:
         if not info["new_request"]:
             more_waived |= self.previous_waived(messages)  # 推薦過時說過不限的，不再問
         missing = self.should_ask(messages, conditions, total, prefs, more_waived)
+        self.trace["missing"] = missing
         if missing:
             note = ("使用者給不出所在的捷運站，你讀不到他的位置，沒辦法依距離排。"
                     "請先委婉說明這件事，再問還需要的資訊。地區只是用來找店，不能說會幫他找近的店"
@@ -1220,13 +1311,12 @@ class Bot:
         shown = [n for n in skipped if n not in rejected]  # 不喜歡的另外用 🚫 列，不重複計算
         exclude = list(dict.fromkeys(rejected + skipped))
 
-        # 2. 呼叫推薦 API（「貴一點沒差」→ 預算多 200 元來找）
-        search_budget = budget + RELAX_BUDGET if budget and "budget" in prefs.get("relax", []) else budget
+        # 2. 呼叫推薦 API
         payload = {
             "district": district,
             "category": category,
             "party_size": party_size,
-            "budget": search_budget,
+            "budget": budget,
             "exclude": exclude,
         }
         if subtype:
@@ -1252,6 +1342,7 @@ class Bot:
         except Exception as e:
             return f"❌ 推薦服務發生錯誤：{e}"
 
+        self.trace["query"] = (payload, data)
         party_relaxed = False
         if not data.get("restaurants") and party_size:
             # 資料裡的店標示的人數大多在 10 人以內：人數太多找不到時，先不限人數再找一次
@@ -1306,10 +1397,10 @@ class Bot:
         relaxed = data.get("relaxed_budget")
         if budget and relaxed:
             if matched == 0:
-                sections.append(f"⚠️ 沒有符合每人 {search_budget} 元預算的店，"
+                sections.append(f"⚠️ 沒有符合每人 {budget} 元預算的店，"
                                 f"以下把預算稍微放寬到每人約 {relaxed} 元來找。")
             else:
-                sections.append(f"⚠️ 符合每人 {search_budget} 元預算的店只有 {matched} 家，"
+                sections.append(f"⚠️ 符合每人 {budget} 元預算的店只有 {matched} 家，"
                                 f"另外補上比預算稍微高一點（放寬到每人約 {relaxed} 元）的選擇。")
         # 子類型：誠實說明哪些店看得出是這種、哪些只是一般同類別的店
         matched_subtype = data.get("matched_subtype")
@@ -1338,15 +1429,13 @@ class Bot:
         # LLM 開場白和推薦理由（上面的說明畫面上已經顯示，開場白不再重複）
         texts, _ = self.current_round(messages)
         # 人數太多、不限人數找的：不讓 LLM 說「適合 30 人」這種資料沒辦法確認的事
-        reason_conditions = (district, category, None if party_relaxed else party_size, search_budget)
+        reason_conditions = (district, category, None if party_relaxed else party_size, budget)
         notes = []
         if no_location:
             notes.append("使用者想要越近越好，但沒有提供所在的捷運站，你讀不到使用者的位置，"
                          "所以這批是照一般的推薦順序。開場請先委婉說明這件事")
         elif prefs.get("sort"):
             notes.append(f"這批店依「{SORT_LABELS[prefs['sort']]}」排序，開場可以順帶提一下")
-        if search_budget != budget:
-            notes.append(f"使用者說預算可以超過一點，所以找到每人 {search_budget} 元")
         intro, reasons = self.write_reasons(texts, reason_conditions, restaurants, subtype,
                                             prefs.get("unsupported"), notes)
         if intro:

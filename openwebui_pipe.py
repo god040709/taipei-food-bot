@@ -1,7 +1,7 @@
 """
 title: Taipei Restaurant Recommendation Pipe
 author: Taipei Food Bot
-version: 4.0.0
+version: 4.1.0
 description: 台北美食推薦機器人（轉送版）：對話交給 api.py 處理；需要 LLM 時，用這裡設定的金鑰代問。
 """
 
@@ -47,6 +47,7 @@ class Pipe:
         ASK_FOLLOWUP: bool = Field(default=True, description="資訊不足時持續反問")
         MAX_ASK: int = Field(default=4, description="同一個需求最多反問幾次")
         SHOW_REASONS: bool = Field(default=True, description="在每家餐廳附上推薦理由")
+        DEBUG: bool = Field(default=False, description="除錯模式：回覆最後附上 LLM 解析、程式整理、查詢條件")
 
     def __init__(self):
         self.valves = self.Valves()
@@ -60,7 +61,7 @@ class Pipe:
 
     def _options(self) -> dict:
         return {k: getattr(self.valves, k) for k in ("USE_LLM_PARSER", "USE_LLM_REASON", "SHOW_CONDITIONS",
-                                                     "ASK_FOLLOWUP", "MAX_ASK", "SHOW_REASONS")}
+                                                     "ASK_FOLLOWUP", "MAX_ASK", "SHOW_REASONS", "DEBUG")}
 
     # ---------------- 呼叫 LLM（只在 API 要求時） ----------------
     def _key(self) -> str:
