@@ -26,6 +26,7 @@ class Options:
     MAX_ASK = 4             # 同一個需求最多反問幾次（避免一直問不完）
     SHOW_REASONS = True     # 在每家餐廳附上推薦理由
     DEBUG = False           # 除錯模式：回覆最後附上「🔧 除錯資訊」
+    OFF_GUARDS = ""         # 關掉的保險規則（逗號分隔，名稱見 understand.py 的 GUARDS），實驗用
 
     def __init__(self, values: Optional[dict] = None):
         for key, value in (values or {}).items():

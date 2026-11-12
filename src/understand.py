@@ -14,8 +14,31 @@ from lexicon import (  # 詞庫、提示詞、文字處理
 )
 from llm import LLMError
 
+# 防 LLM 讀錯的保險規則（都是 LLM 實測讀錯過才加的）。設定 OFF_GUARDS 可以個別關掉，
+# 用來測試換成微調的模型之後，哪些規則已經不需要（finetune/）
+GUARDS = {
+    "homophone": "交給 LLM 前先修同音錯字（大按→大安）",
+    "fill_from_rules": "LLM 沒填的基本條件用規則讀到的補（沿用前文）",
+    "near_rule": "規則讀到的捷運站／地標優先（LLM 會把西門町換成行政區）",
+    "avoid_rule": "規則讀到的不要的類別、多類別（剛吃過火鍋、日式或韓式）",
+    "pref_off": "取消不要連鎖／隱藏版，這句要真的有提到",
+    "budget_min_words": "預算下限，這句要有以上、到、起跳",
+    "switching": "換成別的類型時，不採用 LLM 判斷的不要原本類型",
+    "budget_from_rules": "說了強調或放寬時，預算用規則讀到的（LLM 會順手改預算）",
+    "budget_up_words": "加預算，這句要有貴、高、多、超過、加",
+    "category_name": "句子寫了類型的正式名稱，以使用者寫的為準",
+    "unsure": "說不知道時，LLM 判斷的不限不算",
+    "total_words": "總預算，這次要有總、共、加起來、合計",
+    "choose_on_avoid": "排除目前的類型又沒說換什麼，一律幫你挑",
+}
+
 
 class UnderstandMixin:
+    def guard(self, name: str) -> bool:
+        """這條保險規則有沒有開（預設都開）。"""
+        assert name in GUARDS, name
+        return name not in {g.strip() for g in self.valves.OFF_GUARDS.split(",")}
+
     def parse_user_query(self, text: str):
         """規則解析（不需要 LLM），支援常見口語說法。"""
         district = None
@@ -117,7 +140,8 @@ class UnderstandMixin:
             if not isinstance(content, str) or role not in ("user", "assistant"):
                 continue
             if role == "user":
-                lines.append(f"使用者：{fix_homophones(content[:300])[0]}")  # 先修好錯字再交給 LLM
+                text = content[:300]
+                lines.append(f"使用者：{fix_homophones(text)[0] if self.guard('homophone') else text}")  # 先修好錯字
             elif content.startswith(ASK_MARK):
                 lines.append(f"助理（反問）：{content[:200]}")
             elif content.startswith(CHAT_MARK):
@@ -277,6 +301,11 @@ class UnderstandMixin:
         rule_near = False
         for text in texts:
             p = self.rule_prefs(text)
+            if not self.guard("near_rule"):
+                p.pop("near", None)
+            if not self.guard("avoid_rule"):
+                p.pop("avoid", None)
+                p.pop("cats", None)
             if "near" in p:
                 prefs["near"], prefs["near_label"] = p["near"], p["near_label"]
                 rule_near = True
@@ -294,9 +323,11 @@ class UnderstandMixin:
         for k in ("no_chain", "hidden_gem"):
             if llm_prefs.get(k) is True:
                 prefs[k] = True
-            elif llm_prefs.get(k) is False and any(w in last_text for w in PREF_OFF_WORDS[k]):
+            elif llm_prefs.get(k) is False and (not self.guard("pref_off")
+                                                 or any(w in last_text for w in PREF_OFF_WORDS[k])):
                 prefs[k] = False  # 「連鎖也可以」「有名的也可以」（LLM 常把沒提到的填成 false）
-        if llm_prefs.get("budget_min") and any(w in last_text for w in BUDGET_MIN_WORDS):
+        if llm_prefs.get("budget_min") and (not self.guard("budget_min_words")
+                                            or any(w in last_text for w in BUDGET_MIN_WORDS)):
             prefs["budget_min"] = llm_prefs["budget_min"]
         if llm_prefs.get("sort"):
             prefs["sort"] = llm_prefs["sort"]  # 強調的重點只有一個，以最新的說法為準
@@ -313,7 +344,7 @@ class UnderstandMixin:
         # （LLM 會把原本的類型也當成不要，而這個條件會一直沿用）。「別再推火鍋了」提到的是火鍋本身，照常採用
         switching = any(not neg and c not in llm_prefs.get("avoid", [])
                         for _, c, neg in self.category_mentions(fix_homophones(last_text)[0])) \
-            and not self.rule_prefs(last_text).get("avoid")
+            and not self.rule_prefs(last_text).get("avoid") and self.guard("switching")
         if llm_prefs.get("avoid") and not switching:
             prefs["avoid"] = list(dict.fromkeys(prefs.get("avoid", []) + llm_prefs["avoid"]))
         waived = self.waived_fields(texts)
@@ -362,15 +393,16 @@ class UnderstandMixin:
                 self.trace.update(llm=d, rules=rules)
                 # LLM 沒填的欄位用規則補（例如 LLM 漏掉沿用的條件）。
                 # 「不限」只看使用者有沒有說「地區都可以」「預算不限」這類話（LLM 常把沒說不限的欄位也標成不限）
-                conditions = [lv if lv is not None else rv for lv, rv in zip(llm, rules)]
+                conditions = [lv if lv is not None or not self.guard("fill_from_rules") else rv
+                              for lv, rv in zip(llm, rules)]
                 # 「預算再高一點」「貴一點沒差」→ 預算 +200（說幾次加幾次，條件行看得到）。
                 # LLM 常把前面說過的放寬再填一次，這句話真的有提到才算
                 last_text = texts[-1] if texts else ""
                 raise_budget = "budget" in d["prefs"].get("relax", []) \
-                    and any(w in last_text for w in BUDGET_UP_WORDS)
+                    and (any(w in last_text for w in BUDGET_UP_WORDS) or not self.guard("budget_up_words"))
                 # 使用者強調重點或說要加預算時，LLM 常順手把預算 ×1.3 或 ×0.7 → 預算用規則讀到的
                 if (d["prefs"].get("sort") or "distance" in d["prefs"].get("relax", []) or raise_budget) \
-                        and rules[3]:
+                        and rules[3] and self.guard("budget_from_rules"):
                     if conditions[3] != rules[3]:
                         self.note(f"預算用規則讀到的 {rules[3]}（LLM 填了 {conditions[3]}；"
                                   "說了強調或加預算時，LLM 常順手改預算）")
@@ -384,11 +416,11 @@ class UnderstandMixin:
                 fixed_last = fix_homophones(last_text)[0]
                 named = {c for _, c, neg in self.category_mentions(fixed_last)
                          if not neg and c in fixed_last and c not in d["prefs"].get("avoid", [])}
-                if len(named) == 1 and conditions[1] not in named:
+                if len(named) == 1 and conditions[1] not in named and self.guard("category_name"):
                     self.note(f"類型用這句寫的「{min(named)}」（LLM 填了 {conditions[1]}）")
                     conditions[1] = min(named)
                 # LLM 說「不限」的欄位，只有在那一項本來就不知道時才採用（避免把已知的條件清掉）
-                unsure = any(w in (texts[-1] if texts else "") for w in UNSURE_WORDS)
+                unsure = any(w in (texts[-1] if texts else "") for w in UNSURE_WORDS) and self.guard("unsure")
                 info["llm_waived"] = set() if unsure else                     {f for f, v in zip(FIELDS, conditions) if f in d["waived"] and v is None}
                 info["choose_category"] = d["choose_category"]
                 info.update(keep=d["keep"], outside_area=d["outside_area"], unknown_food=d["unknown_food"])
@@ -434,7 +466,7 @@ class UnderstandMixin:
 
         # 總預算（LLM 讀出來的）：有人數就換算成每人；還不知道人數就先不填，等問完人數再算
         total = info.pop("total", None)
-        if total and not any(w in t for t in texts for w in TOTAL_WORDS):
+        if total and not any(w in t for t in texts for w in TOTAL_WORDS) and self.guard("total_words"):
             self.note(f"LLM 判斷總預算 {total}，但這次沒說總共、合計，不採用（多半是把每人預算當成總額）")
             total = None
         district, category, party_size, budget = conditions
@@ -491,7 +523,7 @@ class UnderstandMixin:
             else:
                 category, subtype = None, None
                 # 不要目前的類別、又沒說要換成什麼 → 一律幫使用者挑一種（不看 LLM 有沒有判斷成「幫我挑」）
-                if not prefs.get("cats"):
+                if not prefs.get("cats") and self.guard("choose_on_avoid"):
                     info["choose_category"] = True
         conditions = (district, category, party_size, budget)
         info.update(total=total, subtype=subtype, prefs=prefs)

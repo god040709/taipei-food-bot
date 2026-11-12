@@ -5,7 +5,10 @@ LLM 呼叫。機器人的程式只認得一個介面：llm.chat(messages, max_to
   用使用者自己的金鑰去問，pipe 把答案送回來後，API 從頭重跑一次，已經拿到的答案直接沿用。
   這樣金鑰只存在 Open WebUI，別人連到 API 也用不到任何人的 LLM 額度。
 - DirectLLM：給本機測試、評估腳本用，直接呼叫 LLM（金鑰從環境變數 LLM_API_KEY 讀取）。
+- RoutedLLM：解析條件交給同一台虛擬機上的小模型（finetune/serve.py），其他（反問措辭、推薦理由、閒聊）
+  和小模型失敗時照舊交給 35B。
 """
+import json
 import os
 import re
 import time
@@ -121,3 +124,51 @@ class DirectLLM:
             raise LLMError(f"LLM 回應錯誤 HTTP {r.status_code}")
         choice = r.json()["choices"][0]
         return clean_text(choice.get("message", {}).get("content"), choice.get("finish_reason"))
+
+
+def is_parse_request(schema: Optional[dict]) -> bool:
+    """解析條件的那一次呼叫（JSON 格式裡有 intent）。"""
+    return bool(schema) and "intent" in (schema.get("properties") or {})
+
+
+class RoutedLLM:
+    """解析條件先問小模型（url，例如 http://127.0.0.1:8100/v1），失敗再交給 fallback（35B）。
+    API 每一輪都從頭重跑，所以小模型的答案（包括失敗）記下來沿用：同一個請求每一輪都走同一條路，
+    不然這一輪小模型失敗、下一輪又成功，pipe 送回來的 35B 答案會對錯題。"""
+    _cache: dict = {}
+    CACHE_SIZE = 500
+
+    def __init__(self, fallback, url: str, timeout: float = 30):
+        self.fallback = fallback
+        self.url = url.rstrip("/")
+        self.timeout = timeout
+
+    @property
+    def enabled(self):
+        return True  # 沒有金鑰也能用小模型解析；其他呼叫由 fallback 自己判斷
+
+    def chat(self, messages: list, max_tokens: int = 400, schema: Optional[dict] = None,
+             temperature: float = 0) -> str:
+        if not is_parse_request(schema):
+            return self.fallback.chat(messages, max_tokens, schema, temperature)
+        key = json.dumps(messages, ensure_ascii=False, sort_keys=True)
+        if key not in self._cache:
+            if len(self._cache) >= self.CACHE_SIZE:
+                self._cache.pop(next(iter(self._cache)))
+            self._cache[key] = self._ask_small(messages, max_tokens)
+        answer = self._cache[key]
+        return answer if answer is not None else self.fallback.chat(messages, max_tokens, schema, temperature)
+
+    def _ask_small(self, messages: list, max_tokens: int) -> Optional[str]:
+        """小模型的答案；連不到、錯誤、回的不是 JSON → None（交給 35B）。"""
+        import requests
+        try:
+            r = requests.post(f"{self.url}/chat/completions", timeout=self.timeout,
+                              json=build_request(messages, max_tokens))
+            if r.status_code != 200:
+                return None
+            choice = r.json()["choices"][0]
+            text = clean_text(choice.get("message", {}).get("content"), choice.get("finish_reason"))
+        except Exception:
+            return None
+        return text if "{" in text else None

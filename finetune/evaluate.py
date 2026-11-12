@@ -8,7 +8,9 @@
     python finetune/evaluate.py --teacher                               # 老師（35B）的分數，不用 GPU
     python finetune/evaluate.py --model unsloth/Qwen3.5-4B              # 沒微調的小模型（基準）
     python finetune/evaluate.py --model finetune/outputs/parser-lora     # 微調後
-    python finetune/evaluate.py --model finetune/outputs/parser-lora --bot   # 另外讓整個機器人用小模型跑一遍情境
+    python finetune/evaluate.py --model finetune/outputs/parser-lora --bot   # 另外讓整個機器人用小模型跑情境、對答案
+    python finetune/evaluate.py --model finetune/outputs/parser-lora --bot --off total_words,category_name
+                                                                         # 關掉某些保險規則再跑，看還需不需要
     （加 --data finetune/data/cases.jsonl 換第二份評估資料）
 結果寫在 finetune/outputs/eval_<名稱>_<資料>.txt（--bot 的對話在 bot_<名稱>.txt）。
 """
@@ -126,7 +128,8 @@ def main():
     ap.add_argument("--teacher", action="store_true", help="評估老師（35B）收集時的答案，不用 GPU")
     ap.add_argument("--data", default=os.path.join(HERE, "data", "eval.jsonl"))
     ap.add_argument("--limit", type=int, default=0, help="只評估前幾筆（試跑用）")
-    ap.add_argument("--bot", action="store_true", help="另外讓整個機器人用小模型跑 tests/scenarios.py")
+    ap.add_argument("--bot", action="store_true", help="另外讓整個機器人用這個模型跑 eval_cases.json，逐句對答案")
+    ap.add_argument("--off", default="", help="--bot 時關掉的保險規則（逗號分隔，名稱見 src/understand.py 的 GUARDS）")
     ap.add_argument("--min-free-gb", type=float, default=6)
     args = ap.parse_args()
     if not (args.model or args.teacher):
@@ -163,23 +166,39 @@ def main():
     print("\n".join(summary))
     print(f"細節：{path}")
 
-    if args.bot and llm:
-        from bot import Bot
-        bot = Bot(llm)
-        bot.valves.USE_LLM_REASON = False
-        out = []
-        for did, turns in eval_dialogues():
-            messages = []
-            out.append(f"{'=' * 60}\n【{did}】")
-            for text in turns:
-                messages.append({"role": "user", "content": text})
-                reply = bot.pipe({"messages": messages})
-                messages.append({"role": "assistant", "content": reply})
-                out.append(f"\n👤 {text}\n\n{reply}\n")
-        path = os.path.join(HERE, "outputs", f"bot_{tag}.txt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(out))
-        print(f"整個機器人的對話：{path}")
+    if args.bot:
+        if llm is None:  # 老師：真的呼叫 35B（需要 LLM_API_KEY），反問措辭、閒聊不呼叫，跟小模型的條件一樣
+            from collect import Recorder
+            from llm import DirectLLM
+            llm = Recorder(DirectLLM(max_calls=600), other=False)
+        run_bot(llm, args.off, f"{tag}{'_off-' + args.off.replace(',', '+') if args.off else ''}")
+
+
+def run_bot(llm, off: str, tag: str):
+    """整個機器人用這個模型解析，跑 eval_cases.json 的情境，每一句對答案（checks.py）。"""
+    from bot import Bot
+    from checks import check
+    bot = Bot(llm, {"OFF_GUARDS": off, "USE_LLM_REASON": False})
+    with open(os.path.join(HERE, "eval_cases.json"), encoding="utf-8") as f:
+        cases = json.load(f)
+    out, failed, n_turns = [], [], 0
+    for case in cases:
+        messages = []
+        out.append(f"{'=' * 60}\n【{case['title']}】")
+        for text, expect in zip(case["turns"], case["expect"]):
+            messages.append({"role": "user", "content": text})
+            reply = bot.pipe({"messages": messages})
+            messages.append({"role": "assistant", "content": reply})
+            n_turns += 1
+            problems = check(reply, expect)
+            out.append(f"\n👤 {text}\n\n{reply}\n" + (f"\n✗ {'；'.join(problems)}\n" if problems else ""))
+            if problems:
+                failed.append(f"【{case['title']}】{text} → {'；'.join(problems)}")
+    path = os.path.join(HERE, "outputs", f"bot_{tag}.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"關掉的規則：{off or '無'}｜{n_turns} 句、有問題 {len(failed)} 句\n\n" + "\n".join(failed)
+                + "\n\n" + "\n".join(out))
+    print(f"整個機器人（關掉的規則：{off or '無'}）：{n_turns} 句、有問題 {len(failed)} 句 → {path}")
 
 
 if __name__ == "__main__":

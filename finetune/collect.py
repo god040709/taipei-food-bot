@@ -25,14 +25,9 @@ sys.path.insert(0, HERE)
 
 from bot import Bot  # noqa: E402
 from labels import changed_fields, gold_label  # noqa: E402
-from llm import DirectLLM, LLMError  # noqa: E402
+from llm import DirectLLM, LLMError, is_parse_request  # noqa: E402
 
 DATA_DIR = os.path.join(HERE, "data")
-
-
-def is_parse_request(schema) -> bool:
-    """解析條件的那一次呼叫（JSON 格式裡有 intent）。"""
-    return bool(schema) and "intent" in (schema.get("properties") or {})
 
 
 class Recorder:

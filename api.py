@@ -17,11 +17,14 @@ import traceback
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 from bot import Bot  # noqa: E402
 from flask import Flask, Response, request  # noqa: E402
-from llm import NeedLLM, ReplayLLM  # noqa: E402
+from llm import NeedLLM, ReplayLLM, RoutedLLM  # noqa: E402
 
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "5000"))
 PROTOCOL = 1  # pipe 和 API 之間的格式版本
+# 設定了的話，解析條件交給這台虛擬機上的小模型（finetune/serve.py，例如 http://127.0.0.1:8100/v1），
+# 其他照舊請 pipe 問 35B；小模型失敗時也退回 35B
+PARSER_URL = os.environ.get("PARSER_URL", "").strip()
 
 
 def handle_chat(data: dict) -> dict:
@@ -36,7 +39,7 @@ def handle_chat(data: dict) -> dict:
     每次都從頭重跑，已經有的答案直接沿用（同樣的對話 + 同樣的答案 → 同樣的結果）。
     """
     llm = ReplayLLM(bool(data.get("llm_enabled")), data.get("llm_results") or [])
-    bot = Bot(llm, data.get("options") or {})
+    bot = Bot(RoutedLLM(llm, PARSER_URL) if PARSER_URL else llm, data.get("options") or {})
     try:
         content = bot.pipe({"messages": data.get("messages") or []})
     except NeedLLM as need:

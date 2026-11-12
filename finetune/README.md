@@ -37,3 +37,25 @@
 - **GPU 是共用的**（RTX 5080 16GB）。`train.py`、`evaluate.py` 開始前會檢查 GPU 剩多少空間，不夠就不跑。
 - 訓練好的 LoRA 存在 `finetune/outputs/`，不進 git。
 - 這是實驗，結果好壞都可以寫進報告；機器人正式用的還是 35B＋規則。
+
+## 接進機器人（4B 解析、35B 寫回覆）
+
+1. 虛擬機上開小模型服務（/opt/venv_torch 的 python，需要 GPU）：
+   `python finetune/serve.py --model finetune/outputs/parser-lora --port 8100`
+2. API 啟動時加上 `PARSER_URL`：
+   `PARSER_URL=http://127.0.0.1:8100/v1 HOST=0.0.0.0 ~/venvs/foodbot/bin/python api.py`
+   - 解析條件交給小模型，其他（反問措辭、開場白、推薦理由、閒聊）照舊由 pipe 問 35B。
+   - 小模型連不到、出錯、回的不是 JSON → 自動退回 35B（最壞就是跟現在一樣）。
+   - 沒設定 `PARSER_URL` → 完全跟原本一樣。
+
+## 測試哪些保險規則可以拿掉
+
+`src/understand.py` 的 `GUARDS` 列出 13 條防 LLM 讀錯的規則，設定 `OFF_GUARDS` 可以個別關掉（預設全開）。
+
+```
+python finetune/evaluate.py --model finetune/outputs/parser-lora --bot                     # 全開
+python finetune/evaluate.py --model finetune/outputs/parser-lora --bot --off total_words  # 關掉一條
+```
+
+`--bot` 會讓整個機器人跑 `eval_cases.json` 的 153 個情境、逐句對答案（`checks.py`）。關掉之後問題沒有變多的規則，
+就代表微調後的模型已經不需要它。`--teacher --bot` 可以拿 35B 做同樣的比較（需要 LLM_API_KEY，約 210 次呼叫）。
