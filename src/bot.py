@@ -8,8 +8,8 @@ from typing import Optional
 
 import service
 from lexicon import (  # 詞庫、提示詞、文字處理
-    ASK_MARK, CHAT_MARK, DEBUG_MARK, NEAR_ASK_MARK, REJECTED_MARK, RESET_WORDS, SUBTYPES,
-    fix_homophones,
+    ASK_MARK, CHAT_MARK, DEBUG_MARK, NEAR_ASK_MARK, NON_MEAL, REJECTED_MARK, RESET_WORDS, SUBTYPES,
+    fix_homophones, to_traditional,
 )
 from dialogue import DialogueMixin
 from memory import MemoryMixin
@@ -49,7 +49,7 @@ class Bot(UnderstandMixin, MemoryMixin, DialogueMixin, RenderMixin):
 
     def _chat(self, messages: list, max_tokens: int = 400, schema: Optional[dict] = None,
               temperature: float = 0) -> str:
-        return self.llm.chat(messages, max_tokens, schema, temperature)
+        return to_traditional(self.llm.chat(messages, max_tokens, schema, temperature))  # LLM 偶爾寫出簡體字
 
     @staticmethod
     def _extract_json(raw: str) -> dict:
@@ -124,7 +124,10 @@ class Bot(UnderstandMixin, MemoryMixin, DialogueMixin, RenderMixin):
                 asked_which or self.match_names(user_text, last_names)
                 or re.search(r"都|全部|這些|這幾|以上", user_text)):
             rejects = info["reject"]  # 原話有指出哪一間（或全部），才採用 LLM 判斷的店
-        if reject_said and not rejects and last_names and not new_search:
+        # 「第1間留著 其他換掉」「2號留下來 其他幫我換」：LLM 判斷有要保留的店（提示詞裡 keep 就是
+        # 「換一批時要保留的」）→ 換一批、保留那幾間，不用問是哪一間
+        keep_rest = bool(info["keep"] and not rejects)
+        if reject_said and not rejects and last_names and not new_search and not keep_rest:
             if self.wants_more(user_text):
                 rejects = list(last_names)  # 「吃過了，換別的」→ 這批都不要
             else:
@@ -185,7 +188,7 @@ class Bot(UnderstandMixin, MemoryMixin, DialogueMixin, RenderMixin):
         # 「推薦別的」→ 排除同樣條件下已經推薦過的店
         condition_line = self.describe_conditions(district, category, party_size, budget, source, subtype,
                                                   info["llm_note"], prefs)
-        more = self.wants_more(user_text) or info["intent"] == "more"
+        more = self.wants_more(user_text) or info["intent"] == "more" or keep_rest
         before = self.rejected_history(messages)
         if info["new_request"]:
             # 全新的需求：之前不想去的店不再排除（畫面上會說明，使用者還是不想去可以再說）
@@ -220,7 +223,8 @@ class Bot(UnderstandMixin, MemoryMixin, DialogueMixin, RenderMixin):
         payload.update({
             "near": prefs.get("near"),
             "categories": prefs.get("cats"),
-            "avoid_categories": prefs.get("avoid"),
+            # 沒指定類型（類型不限）：不推酒吧、甜點這種不算正餐的（不寫進條件行，只影響這次查詢）
+            "avoid_categories": (prefs.get("avoid") or []) + ([] if category or prefs.get("cats") else NON_MEAL),
             "no_chain": bool(prefs.get("no_chain")),
             "hidden_gem": bool(prefs.get("hidden_gem")),
             "budget_min": prefs.get("budget_min"),
@@ -276,10 +280,7 @@ class Bot(UnderstandMixin, MemoryMixin, DialogueMixin, RenderMixin):
         texts, _ = self.current_round(messages)
         # 人數太多、不限人數找的：不讓 LLM 說「適合 30 人」這種資料沒辦法確認的事
         reason_conditions = (district, category, None if party_relaxed else party_size, budget)
-        notes = []
-        if facts:
-            notes.append("這批推薦有些事要讓使用者知道，開場請用一兩句自然地帶過（不用寫出放寬到多少）："
-                         + "；".join(facts))
+        notes = [f"要讓使用者知道的事：{'；'.join(facts)}"] if facts else []
         intro, reasons = self.write_reasons(texts, reason_conditions, restaurants, subtype,
                                             prefs.get("unsupported"), notes, prefs.get("budget_min"))
         if intro:

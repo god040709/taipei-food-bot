@@ -3,6 +3,7 @@
 是 Bot（bot.py）的一部分：函式裡的 self 就是 Bot，可以互相呼叫。
 """
 import json
+import re
 from typing import Optional
 
 from lexicon import (  # 詞庫、提示詞、文字處理
@@ -36,9 +37,10 @@ class RenderMixin:
                      "不知道店家有沒有，開場和理由都不可以說店家符合這些條件")
         if notes:
             cond += "。" + "。".join(notes)
-        keys = ["name", "category", "min_price", "max_price", "subtype_match", "distance",
-                "facts", "summary", "highlights", "reviews"]
-        data = [{k: r.get(k) for k in keys if r.get(k) not in (None, "", [])} for r in restaurants]
+        keys = ["name", "category", "price", "subtype_match", "distance", "facts", "summary", "highlights", "reviews"]
+        # 價格寫成文字：資料裡「200 元以下」存成 1～200，直接給數字 LLM 會寫成「1 至 200 元」
+        data = [{k: v for k, v in {**r, "price": self.price_text(r, fit=False)}.items()
+                 if k in keys and v not in (None, "", [])} for r in restaurants]
         n = len(restaurants)
         schema = {"type": "object", "additionalProperties": False, "required": ["intro", "reasons"],
                   "properties": {"intro": {"type": "string"},
@@ -55,12 +57,23 @@ class RenderMixin:
                 max_tokens=900, schema=schema,
             )
             result = self._extract_json(raw)
+            intro = str(result.get("intro") or "").strip()
             reasons = [str(x).strip() for x in result.get("reasons", [])]
-            if len(reasons) != len(restaurants):
-                raise ValueError("推薦理由數量不符")
-            return (result.get("intro") or None), reasons
+            intro = intro if self.looks_like_text(intro) else None
+            # LLM 偶爾格式崩壞：理由全擠在第 1 家、其他家變成「reasons_count」這類碎片、或抄開場白
+            # → 整批改用資料組成的理由
+            broken = len(reasons) != len(restaurants) or not all(map(self.looks_like_text, reasons)) \
+                or len(set(reasons + [intro])) < len(reasons) + 1  # 有重複（抄開場白、兩家同一句）
+            if broken:
+                return intro, fallback
+            return intro, reasons
         except Exception:
             return None, fallback
+
+    @staticmethod
+    def looks_like_text(text: str) -> bool:
+        """是一般的中文句子（至少 8 個中文字），不是 JSON 碎片或英文欄位名。"""
+        return len(re.findall(r"[\u4e00-\u9fff]", text or "")) >= 8 and not re.search(r"[{}\[\]_]", text)
 
     @staticmethod
     def near_text(prefs: dict) -> str:
@@ -106,10 +119,12 @@ class RenderMixin:
         return "｜".join(parts)
 
     @staticmethod
-    def price_text(r: dict) -> str:
-        # 價格區間是「多數人用餐的花費」，不是最低／最高消費
+    def price_text(r: dict, fit: bool = True) -> str:
+        # 價格區間是「多數人用餐的花費」，不是最低／最高消費。fit：加上超出預算的提醒
         low, high = int(r["min_price"]), int(r["max_price"])
         text = f"多數人花費 ${high} 以下 / 人" if low <= 1 else f"多數人花費 ${low} - ${high} / 人"
+        if not fit:
+            return text
         if r.get("budget_fit") == "partial":
             text += "（⚠️ 可能超出預算）"
         elif r.get("budget_fit") == "over":

@@ -11,7 +11,7 @@ from typing import Optional
 import service
 from lexicon import (  # 詞庫、提示詞、文字處理
     ASK_HINT_WORDS, ASK_MARK, CATEGORIES, CATEGORY_SYNONYMS, CHAT_MARK, CHAT_PROMPT, CHOOSE_MARK, CN_INDEX,
-    DISTRICTS, FIELDS, LABELS, NEAR_ASK_MARK, QUESTIONS, RESET_MARK, SAY_PROMPT, UNSURE_WORDS, strip_marks,
+    DISTRICTS, FIELDS, LABELS, NEAR_ASK_MARK, NON_MEAL, QUESTIONS, RESET_MARK, SAY_PROMPT, UNSURE_WORDS, strip_marks,
 )
 
 
@@ -225,14 +225,14 @@ class DialogueMixin:
         return "\n".join(lines)
 
     def pick_category(self, messages: list, conditions, prefs: dict) -> Optional[str]:
-        """隨機挑一種料理：只從目前地區、預算下有店的類別挑，避開不要的類別和上一次的類別。
+        """隨機挑一種料理：只從目前地區、預算下有店的類別挑，避開不要的類別、上一次的類別和不算正餐的（酒吧、甜點）。
         用對話內容當亂數種子：同一則訊息重跑時（API 每次都從頭跑）會挑到同一種。"""
         district, _, party_size, budget = conditions
         counts = {c["category"]: c["count"] for c in service.handle_categories(
             {"district": None if prefs.get("near") else district, "party_size": party_size,
              "budget": budget}).get("categories", [])}
         previous = (self.previous_conditions(messages) or [None, None])[1]
-        avoid = set(prefs.get("avoid", [])) | {previous}
+        avoid = set(prefs.get("avoid", [])) | {previous} | set(NON_MEAL)
         candidates = sorted(c for c in CATEGORIES if counts.get(c, 0) >= 5 and c not in avoid) \
             or sorted(c for c in CATEGORIES if counts.get(c, 0) and c not in avoid) \
             or [c for c in CATEGORIES if c not in avoid]

@@ -158,10 +158,10 @@
 
 ---
 
-**5. 麵屋 千雲 林森店**
-📍 中山區・拉麵｜⭐ 4.5（10,731 則評論）｜💰 多數人花費 $200 - $400 / 人
-✨ 中山區拉麵中評論數第 2 多（共 20 家）。
-🏠 10491臺北市中山區正義里林森北路105-1號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E9%BA%B5%E5%B1%8B%20%E5%8D%83%E9%9B%B2%20%E6%9E%97%E6%A3%AE%E5%BA%97&query_place_id=ChIJqYmvbtipQjQR8AWj1SGTLVM)
+**5. 荷麵亭 HASUMENTEI 北投店**
+📍 士林區・拉麵｜⭐ 4.8（2,424 則評論）｜💰 多數人花費 $200 - $400 / 人
+✨ 評分 4.8、超過 2,000 則評論，口碑穩定。
+🏠 112臺北市北投區大同里育仁路45號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E8%8D%B7%E9%BA%B5%E4%BA%AD%20HASUMENTEI%20%E5%8C%97%E6%8A%95%E5%BA%97&query_place_id=ChIJM_xungWvQjQRGekbrndOlXk)
 
 ============================================================
 【基本：總預算】
@@ -1596,40 +1596,42 @@
 
 👤 剛吃過火鍋，換別的類型
 
-🔎 搜尋條件：大安區｜不限類別｜2 人｜每人 800 元內｜不要：火鍋（規則解析・未設定 LLM 金鑰）
+🔎 搜尋條件：大安區｜中式餐廳｜2 人｜每人 800 元內｜不要：火鍋（規則解析・未設定 LLM 金鑰）
 
-**1. Posino Taipei**
-📍 大安區・酒吧｜⭐ 5.0（8,904 則評論）｜💰 多數人花費 $400 - $600 / 人
-✨ 大安區酒吧中評論數第 2 多（共 20 家）；評分 5.0、超過 8,000 則評論，口碑穩定；價格比同區同類型的多數店家親民；多數人的花費都在每人 800 元預算內。
-🏠 106臺北市大安區臨江里基隆路二段128號2號樓之2｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=Posino%20Taipei&query_place_id=ChIJwcTgAa2rQjQRhAzPyqcPDz4)
+🎲 幫你挑了「中式餐廳」，想換一種可以再跟我說
 
----
-
-**2. 胖肚肚燒肉 大安店**
-📍 大安區・燒肉｜⭐ 4.8（5,598 則評論）｜💰 多數人花費 $600 - $800 / 人
-✨ 評分 4.8、超過 5,000 則評論，口碑穩定；價格比同區同類型的多數店家親民；多數人的花費都在每人 800 元預算內。
-🏠 106臺北市大安區龍陣里復興南路二段156號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E8%83%96%E8%82%9A%E8%82%9A%E7%87%92%E8%82%89%20%E5%A4%A7%E5%AE%89%E5%BA%97&query_place_id=ChIJ4bCwiy6rQjQRJUxidbgF2ow)
+**1. 秦味館**
+📍 大安區・中式餐廳｜⭐ 4.6（4,085 則評論）｜💰 多數人花費 $400 - $600 / 人
+✨ 大安區中式餐廳中評論數第 2 多（共 20 家）；價格比同區同類型的多數店家親民；多數人的花費都在每人 800 元預算內。
+🏠 106臺北市大安區車層里延吉街138巷2號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E7%A7%A6%E5%91%B3%E9%A4%A8&query_place_id=ChIJ0_ua_cWrQjQRIbUBC-UUu_E)
 
 ---
 
-**3. 曼谷泰式料理（永和店）**
-📍 大安區・泰式料理｜⭐ 4.9（3,122 則評論）｜💰 多數人花費 $400 - $600 / 人
-✨ 大安區泰式料理中評論數第 1 多（共 19 家）；評分 4.9、超過 3,000 則評論，口碑穩定；多數人的花費都在每人 800 元預算內。
-🏠 234新北市永和區民樂里民樂街41巷1號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E6%9B%BC%E8%B0%B7%E6%B3%B0%E5%BC%8F%E6%96%99%E7%90%86%EF%BC%88%E6%B0%B8%E5%92%8C%E5%BA%97%EF%BC%89&query_place_id=ChIJIRBT-Y6rQjQRIQ7PlYKjTKk)
+**2. 豐盛食堂**
+📍 大安區・中式餐廳｜⭐ 4.4（2,584 則評論）｜💰 多數人花費 $400 - $600 / 人
+✨ 價格比同區同類型的多數店家親民；多數人的花費都在每人 800 元預算內。
+🏠 106臺北市大安區永康里麗水街1之3號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E8%B1%90%E7%9B%9B%E9%A3%9F%E5%A0%82&query_place_id=ChIJ97_CUYKpQjQRoiw8x6BqopA)
 
 ---
 
-**4. 忠孝｜燒肉政宗 YAKINIKU MASAMUNE**
-📍 大安區・燒肉｜⭐ 4.8（4,315 則評論）｜💰 多數人花費 $400 - $600 / 人
-✨ 評分 4.8、超過 4,000 則評論，口碑穩定；價格比同區同類型的多數店家親民；多數人的花費都在每人 800 元預算內。
-🏠 106臺北市大安區忠孝東路四段101巷7號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E5%BF%A0%E5%AD%9D%EF%BD%9C%E7%87%92%E8%82%89%E6%94%BF%E5%AE%97%20YAKINIKU%20MASAMUNE&query_place_id=ChIJNR1pKRWrQjQRdJxVoSQTBm4)
+**3. 泰和樓**
+📍 大安區・中式餐廳｜⭐ 4.3（2,423 則評論）｜💰 多數人花費 $600 - $800 / 人
+✨ 多數人的花費都在每人 800 元預算內。
+🏠 106臺北市大安區錦泰里杭州南路二段61-20號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E6%B3%B0%E5%92%8C%E6%A8%93&query_place_id=ChIJbyUU8imqQjQRUvC4IivLW4A)
 
 ---
 
-**5. 林居sushi日本料理**
-📍 大安區・日式料理｜⭐ 4.8（3,933 則評論）｜💰 多數人花費 $200 - $400 / 人
-✨ 大安區日式料理中評論數第 2 多（共 20 家）；評分 4.8、超過 3,000 則評論，口碑穩定；價格比同區同類型的多數店家親民；多數人的花費都在每人 800 元預算內。
-🏠 106臺北市大安區住安里復興南路二段11號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E6%9E%97%E5%B1%85sushi%E6%97%A5%E6%9C%AC%E6%96%99%E7%90%86&query_place_id=ChIJITsMLsOrQjQR9L9Dpgc05yY)
+**4. 忠南飯館**
+📍 大安區・中式餐廳｜⭐ 4.2（3,166 則評論）｜💰 多數人花費 $200 - $400 / 人
+✨ 價格比同區同類型的多數店家親民；多數人的花費都在每人 800 元預算內。
+🏠 106臺北市大安區和安里仁愛路三段88號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E5%BF%A0%E5%8D%97%E9%A3%AF%E9%A4%A8&query_place_id=ChIJvfRr2NWrQjQRZSTAyJ3KtLE)
+
+---
+
+**5. 湘八老**
+📍 大安區・中式餐廳｜⭐ 4.3（1,878 則評論）｜💰 多數人花費 $600 - $800 / 人
+✨ 多數人的花費都在每人 800 元預算內。
+🏠 106臺北市大安區義安里安和路二段74巷8號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E6%B9%98%E5%85%AB%E8%80%81&query_place_id=ChIJ87I138yrQjQR-lABGmCr6jc)
 
 ============================================================
 【排除類別（一開始就說）】
@@ -1659,17 +1661,17 @@
 
 ---
 
-**4. 麵屋 千雲 林森店**
-📍 中山區・拉麵｜⭐ 4.5（10,731 則評論）｜💰 多數人花費 $200 - $400 / 人
-✨ 中山區拉麵中評論數第 2 多（共 20 家）；多數人的花費都在每人 500 元預算內。
-🏠 10491臺北市中山區正義里林森北路105-1號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E9%BA%B5%E5%B1%8B%20%E5%8D%83%E9%9B%B2%20%E6%9E%97%E6%A3%AE%E5%BA%97&query_place_id=ChIJqYmvbtipQjQR8AWj1SGTLVM)
-
----
-
-**5. 美術系壽司-台北中山店**
+**4. 美術系壽司-台北中山店**
 📍 中山區・日式料理｜⭐ 4.7（3,964 則評論）｜💰 多數人花費 $200 - $400 / 人
 ✨ 評分 4.7、超過 3,000 則評論，口碑穩定；價格比同區同類型的多數店家親民；多數人的花費都在每人 500 元預算內。
 🏠 10491臺北市中山區民權西路36-1號1樓｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E7%BE%8E%E8%A1%93%E7%B3%BB%E5%A3%BD%E5%8F%B8-%E5%8F%B0%E5%8C%97%E4%B8%AD%E5%B1%B1%E5%BA%97&query_place_id=ChIJoWx2xJWpQjQRdECjBbw_IkA)
+
+---
+
+**5. 4+ Break Breakfast**
+📍 中山區・早午餐｜⭐ 4.8（1,825 則評論）｜💰 多數人花費 $200 以下 / 人
+✨ 評分 4.8、超過 1,000 則評論，口碑穩定；價格比同區同類型的多數店家親民；多數人的花費都在每人 500 元預算內。
+🏠 10491臺北市中山區朱園里松江路53號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=4%2B%20Break%20Breakfast&query_place_id=ChIJLYuEGmKpQjQRPcp6vt8pTnM)
 
 ============================================================
 【資料沒有的條件】
@@ -2536,29 +2538,28 @@
 
 ---
 
-**2. 麵屋 千雲 林森店**
-📍 中山區・拉麵｜⭐ 4.5（10,731 則評論）｜💰 多數人花費 $200 - $400 / 人（⚠️ 可能超出預算）
-✨ 中山區拉麵中評論數第 2 多（共 20 家）。
-🏠 10491臺北市中山區正義里林森北路105-1號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E9%BA%B5%E5%B1%8B%20%E5%8D%83%E9%9B%B2%20%E6%9E%97%E6%A3%AE%E5%BA%97&query_place_id=ChIJqYmvbtipQjQR8AWj1SGTLVM)
-
----
-
-**3. 麒麟創作拉麵坊**
+**2. 麒麟創作拉麵坊**
 📍 中山區・拉麵｜⭐ 4.6（2,746 則評論）｜💰 多數人花費 $200 - $400 / 人（⚠️ 可能超出預算）
 🏠 10491台北市中山区中山北路一段140巷25號1樓｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E9%BA%92%E9%BA%9F%E5%89%B5%E4%BD%9C%E6%8B%89%E9%BA%B5%E5%9D%8A&query_place_id=ChIJRYLOKvmpQjQRSrAwjEP7e9I)
 
 ---
 
-**4. 京都柚子豚骨拉麵 中山本店**
+**3. 京都柚子豚骨拉麵 中山本店**
 📍 中山區・拉麵｜⭐ 4.4（5,364 則評論）｜💰 多數人花費 $200 - $400 / 人（⚠️ 可能超出預算）
 ✨ 店名特色：本店、豚骨拉麵；中山區拉麵中評論數第 3 多（共 20 家）。
 🏠 104臺北市中山區民安里長安西路19巷2弄23號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E4%BA%AC%E9%83%BD%E6%9F%9A%E5%AD%90%E8%B1%9A%E9%AA%A8%E6%8B%89%E9%BA%B5%20%E4%B8%AD%E5%B1%B1%E6%9C%AC%E5%BA%97&query_place_id=ChIJrVwLL4mpQjQRK39Kwhp9T3E)
 
 ---
 
-**5. 橫濱家系拉麵 特濃屋**
+**4. 橫濱家系拉麵 特濃屋**
 📍 中山區・拉麵｜⭐ 4.4（4,892 則評論）｜💰 多數人花費 $200 - $400 / 人（⚠️ 可能超出預算）
 🏠 104臺北市中山區中山里中山北路二段77巷22號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E6%A9%AB%E6%BF%B1%E5%AE%B6%E7%B3%BB%E6%8B%89%E9%BA%B5%20%E7%89%B9%E6%BF%83%E5%B1%8B&query_place_id=ChIJd7h_r0KpQjQRy7izk5vhCq4)
+
+---
+
+**5. 池音 雞白湯ラーメン**
+📍 中山區・拉麵｜⭐ 4.5（2,148 則評論）｜💰 多數人花費 $200 - $400 / 人（⚠️ 可能超出預算）
+🏠 103臺北市大同區赤峰街23巷25號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E6%B1%A0%E9%9F%B3%20%E9%9B%9E%E7%99%BD%E6%B9%AF%E3%83%A9%E3%83%BC%E3%83%A1%E3%83%B3&query_place_id=ChIJp39dNV6pQjQRq7mVGxo4JnQ)
 
 ============================================================
 【修改：取消隱藏版】
@@ -4112,24 +4113,24 @@
 
 ---
 
-**3. Intention**
-📍 大安區・酒吧｜⭐ 4.9（15,869 則評論）｜💰 多數人花費 $400 - $1000 / 人
-✨ 大安區酒吧中評論數第 1 多（共 20 家）；評分 4.9、超過 15,000 則評論，口碑穩定。
-🏠 106臺北市大安區建倫里敦化南路1段219號2樓｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=Intention&query_place_id=ChIJ6Tlpk8arQjQRuez5jq7aRbc)
-
----
-
-**4. IKIGAI 燒肉專門店 天母高島屋店**
+**3. IKIGAI 燒肉專門店 天母高島屋店**
 📍 士林區・燒肉｜⭐ 4.9（15,817 則評論）｜💰 多數人花費 $400 - $600 / 人
 ✨ 士林區燒肉中評論數第 1 多（共 20 家）；評分 4.9、超過 15,000 則評論，口碑穩定。
 🏠 111臺北市士林區三玉里忠誠路二段55號B1｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=IKIGAI%20%E7%87%92%E8%82%89%E5%B0%88%E9%96%80%E5%BA%97%20%E5%A4%A9%E6%AF%8D%E9%AB%98%E5%B3%B6%E5%B1%8B%E5%BA%97&query_place_id=ChIJ7dCMdHSvQjQRoJM91rLWQnc)
 
 ---
 
-**5. Posino Taipei**
-📍 大安區・酒吧｜⭐ 5.0（8,904 則評論）｜💰 多數人花費 $400 - $600 / 人
-✨ 大安區酒吧中評論數第 2 多（共 20 家）；評分 5.0、超過 8,000 則評論，口碑穩定；價格比同區同類型的多數店家親民。
-🏠 106臺北市大安區臨江里基隆路二段128號2號樓之2｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=Posino%20Taipei&query_place_id=ChIJwcTgAa2rQjQRhAzPyqcPDz4)
+**4. 老井極上燒肉 台北信義店**
+📍 信義區・燒肉｜⭐ 4.9（13,963 則評論）｜💰 多數人花費 $2000 - $4000 / 人
+✨ 信義區燒肉中評論數第 1 多（共 19 家）；評分 4.9、超過 13,000 則評論，口碑穩定；屬於同區同類型中較高價位的選擇。
+🏠 110台北市信义区安康里松仁路101號B1｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E8%80%81%E4%BA%95%E6%A5%B5%E4%B8%8A%E7%87%92%E8%82%89%20%E5%8F%B0%E5%8C%97%E4%BF%A1%E7%BE%A9%E5%BA%97&query_place_id=ChIJDRg6PQCrQjQRF5UBQT_vCSE)
+
+---
+
+**5. 肉次方 燒肉放題 台北峨眉店**
+📍 萬華區・燒肉｜⭐ 4.8（24,006 則評論）｜💰 多數人花費 $800 - $1000 / 人
+✨ 萬華區燒肉中評論數第 1 多（共 17 家）；評分 4.8、超過 24,000 則評論，口碑穩定。
+🏠 108台北市万华区万寿里峨眉街37號4樓｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E8%82%89%E6%AC%A1%E6%96%B9%20%E7%87%92%E8%82%89%E6%94%BE%E9%A1%8C%20%E5%8F%B0%E5%8C%97%E5%B3%A8%E7%9C%89%E5%BA%97&query_place_id=ChIJGyPX2yKpQjQRIT3DHLFGMHY)
 
 ============================================================
 【流程：推薦完說好】
@@ -4509,29 +4510,28 @@
 
 ---
 
-**2. 麵屋 千雲 林森店**
-📍 中山區・拉麵｜⭐ 4.5（10,731 則評論）｜💰 多數人花費 $200 - $400 / 人（⚠️ 可能超出預算）
-✨ 中山區拉麵中評論數第 2 多（共 20 家）。
-🏠 10491臺北市中山區正義里林森北路105-1號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E9%BA%B5%E5%B1%8B%20%E5%8D%83%E9%9B%B2%20%E6%9E%97%E6%A3%AE%E5%BA%97&query_place_id=ChIJqYmvbtipQjQR8AWj1SGTLVM)
-
----
-
-**3. 麒麟創作拉麵坊**
+**2. 麒麟創作拉麵坊**
 📍 中山區・拉麵｜⭐ 4.6（2,746 則評論）｜💰 多數人花費 $200 - $400 / 人（⚠️ 可能超出預算）
 🏠 10491台北市中山区中山北路一段140巷25號1樓｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E9%BA%92%E9%BA%9F%E5%89%B5%E4%BD%9C%E6%8B%89%E9%BA%B5%E5%9D%8A&query_place_id=ChIJRYLOKvmpQjQRSrAwjEP7e9I)
 
 ---
 
-**4. 京都柚子豚骨拉麵 中山本店**
+**3. 京都柚子豚骨拉麵 中山本店**
 📍 中山區・拉麵｜⭐ 4.4（5,364 則評論）｜💰 多數人花費 $200 - $400 / 人（⚠️ 可能超出預算）
 ✨ 店名特色：本店、豚骨拉麵；中山區拉麵中評論數第 3 多（共 20 家）。
 🏠 104臺北市中山區民安里長安西路19巷2弄23號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E4%BA%AC%E9%83%BD%E6%9F%9A%E5%AD%90%E8%B1%9A%E9%AA%A8%E6%8B%89%E9%BA%B5%20%E4%B8%AD%E5%B1%B1%E6%9C%AC%E5%BA%97&query_place_id=ChIJrVwLL4mpQjQRK39Kwhp9T3E)
 
 ---
 
-**5. 橫濱家系拉麵 特濃屋**
+**4. 橫濱家系拉麵 特濃屋**
 📍 中山區・拉麵｜⭐ 4.4（4,892 則評論）｜💰 多數人花費 $200 - $400 / 人（⚠️ 可能超出預算）
 🏠 104臺北市中山區中山里中山北路二段77巷22號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E6%A9%AB%E6%BF%B1%E5%AE%B6%E7%B3%BB%E6%8B%89%E9%BA%B5%20%E7%89%B9%E6%BF%83%E5%B1%8B&query_place_id=ChIJd7h_r0KpQjQRy7izk5vhCq4)
+
+---
+
+**5. 池音 雞白湯ラーメン**
+📍 中山區・拉麵｜⭐ 4.5（2,148 則評論）｜💰 多數人花費 $200 - $400 / 人（⚠️ 可能超出預算）
+🏠 103臺北市大同區赤峰街23巷25號｜🗺️ [在 Google Maps 開啟](https://www.google.com/maps/search/?api=1&query=%E6%B1%A0%E9%9F%B3%20%E9%9B%9E%E7%99%BD%E6%B9%AF%E3%83%A9%E3%83%BC%E3%83%A1%E3%83%B3&query_place_id=ChIJp39dNV6pQjQRq7mVGxo4JnQ)
 
 ============================================================
 【疊加：附近＋不要連鎖＋隱藏版】

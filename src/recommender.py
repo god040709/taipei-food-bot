@@ -129,7 +129,10 @@ def brand_key(name) -> str:
         m = re.match(r"[a-z0-9&'.+ ]+", token)
         key = " ".join(m.group(0).split()[:2]) if m else ""
         return key if len(key.replace(" ", "")) >= 5 else ""
-    token = token.split()[0] if token.split() else ""
+    words = token.split()
+    token = words[0] if words else ""
+    if len(token) < 3 and len(words) > 1:
+        token += words[1]  # 「麵屋 千雲 林森店」→「麵屋千雲」
     # 去掉結尾的分店名：「鼎泰豐信義店」→「鼎泰豐」
     stripped = re.sub(r"(?:台北|臺北)?[一-鿿]{1,4}(?:分店|總店|門市|店)$", "", token)
     token = stripped if len(stripped) >= 3 else token

@@ -7,10 +7,10 @@ from typing import Optional
 
 from recommender import BUDGET_STEP  # 預算的一個級距（200 元）
 from lexicon import (  # 詞庫、提示詞、文字處理
-    ASK_MARK, BUDGET_UP_WORDS, CATEGORIES, CATEGORY_SYNONYMS, CHAT_MARK, CHOOSE_MARK, CN_INDEX, DISTRICTS,
+    ASK_MARK, BUDGET_MIN_WORDS, BUDGET_UP_WORDS, CATEGORIES, CATEGORY_SYNONYMS, CHAT_MARK, CHOOSE_MARK, CN_INDEX, DISTRICTS,
     FIELDS, FIELD_SKIP_WORDS, MORE_WORDS, NEG_AFTER_RE, NEG_BEFORE_RE, NUM, PARSE_PROMPT, PERSON_PREFS,
     PREF_OFF_WORDS, REJECT_SOFT, REJECT_STRONG, RELAXES, RELAX_LABELS, SKIP_WORDS, SORTS, STYLE_WORDS,
-    SUBTYPES, UNSURE_WORDS, as_list, find_near, fix_homophones, to_number,
+    SUBTYPES, TOTAL_WORDS, UNSURE_WORDS, as_list, find_near, fix_homophones, to_number,
 )
 from llm import LLMError
 
@@ -296,7 +296,7 @@ class UnderstandMixin:
                 prefs[k] = True
             elif llm_prefs.get(k) is False and any(w in last_text for w in PREF_OFF_WORDS[k]):
                 prefs[k] = False  # 「連鎖也可以」「有名的也可以」（LLM 常把沒提到的填成 false）
-        if llm_prefs.get("budget_min") and not prefs.get("budget_min"):
+        if llm_prefs.get("budget_min") and any(w in last_text for w in BUDGET_MIN_WORDS):
             prefs["budget_min"] = llm_prefs["budget_min"]
         if llm_prefs.get("sort"):
             prefs["sort"] = llm_prefs["sort"]  # 強調的重點只有一個，以最新的說法為準
@@ -309,7 +309,12 @@ class UnderstandMixin:
         elif any(self.parse_user_query(t)[1] for t in texts) and \
                 not any(self.rule_prefs(t).get("cats") for t in texts):
             prefs.pop("cats", None)  # 改說單一類別 → 不再是「日式或韓式」
-        if llm_prefs.get("avoid"):
+        # 「換成拉麵」：這句說了要改吃別的類型、又沒有排斥的說法 → 不採用 LLM 判斷的「不要的類別」
+        # （LLM 會把原本的類型也當成不要，而這個條件會一直沿用）。「別再推火鍋了」提到的是火鍋本身，照常採用
+        switching = any(not neg and c not in llm_prefs.get("avoid", [])
+                        for _, c, neg in self.category_mentions(fix_homophones(last_text)[0])) \
+            and not self.rule_prefs(last_text).get("avoid")
+        if llm_prefs.get("avoid") and not switching:
             prefs["avoid"] = list(dict.fromkeys(prefs.get("avoid", []) + llm_prefs["avoid"]))
         waived = self.waived_fields(texts)
         if "district" in waived:
@@ -375,6 +380,13 @@ class UnderstandMixin:
                 if raise_budget and conditions[3]:
                     self.note(f"加預算：{conditions[3]} + {BUDGET_STEP}")
                     conditions[3] += BUDGET_STEP
+                # 這句直接寫了某個類別的正式名稱（「換成拉麵」）→ 以使用者寫的為準（LLM 偶爾把拉麵歸成日式料理）
+                fixed_last = fix_homophones(last_text)[0]
+                named = {c for _, c, neg in self.category_mentions(fixed_last)
+                         if not neg and c in fixed_last and c not in d["prefs"].get("avoid", [])}
+                if len(named) == 1 and conditions[1] not in named:
+                    self.note(f"類型用這句寫的「{min(named)}」（LLM 填了 {conditions[1]}）")
+                    conditions[1] = min(named)
                 # LLM 說「不限」的欄位，只有在那一項本來就不知道時才採用（避免把已知的條件清掉）
                 unsure = any(w in (texts[-1] if texts else "") for w in UNSURE_WORDS)
                 info["llm_waived"] = set() if unsure else                     {f for f, v in zip(FIELDS, conditions) if f in d["waived"] and v is None}
@@ -422,6 +434,9 @@ class UnderstandMixin:
 
         # 總預算（LLM 讀出來的）：有人數就換算成每人；還不知道人數就先不填，等問完人數再算
         total = info.pop("total", None)
+        if total and not any(w in t for t in texts for w in TOTAL_WORDS):
+            self.note(f"LLM 判斷總預算 {total}，但這次沒說總共、合計，不採用（多半是把每人預算當成總額）")
+            total = None
         district, category, party_size, budget = conditions
         if total:
             budget = total // party_size if party_size else None
@@ -465,12 +480,19 @@ class UnderstandMixin:
             asked = {c for t in fixed_texts for _, c, neg in self.category_mentions(t) if not neg}
             if source == "LLM" and conditions[1] != prev_category:
                 asked.add(conditions[1])
+            # 「別再推火鍋了」：LLM 判斷在排斥目前的類別 → 不算想吃（規則讀不出這種否定，會以為提到火鍋＝想吃）。
+            # 這次才提出的類別不會同時不要（「大安 中式 要素食」LLM 會把中式也填進不要的類別）
+            if prev_category in info["llm_prefs"].get("avoid", []) and not new_request:
+                asked.discard(prev_category)
             if category in asked:
                 prefs["avoid"] = [c for c in prefs["avoid"] if c != category]
                 if not prefs["avoid"]:
                     prefs.pop("avoid")
             else:
                 category, subtype = None, None
+                # 不要目前的類別、又沒說要換成什麼 → 一律幫使用者挑一種（不看 LLM 有沒有判斷成「幫我挑」）
+                if not prefs.get("cats"):
+                    info["choose_category"] = True
         conditions = (district, category, party_size, budget)
         info.update(total=total, subtype=subtype, prefs=prefs)
         self.trace.update(source=source, final=conditions, prefs=prefs, llm_note=info["llm_note"])
