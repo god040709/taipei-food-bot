@@ -12,7 +12,7 @@
     python finetune/evaluate.py --model finetune/outputs/parser-lora --bot --off total_words,category_name
                                                                          # 關掉某些保險規則再跑，看還需不需要
     （加 --data finetune/data/cases.jsonl 換第二份評估資料）
-結果寫在 finetune/outputs/eval_<名稱>_<資料>.txt（--bot 的對話在 bot_<名稱>.txt）。
+結果寫在 finetune/outputs/（環境變數 FINETUNE_OUT 可以改）的 eval_<名稱>_<資料>.txt（--bot 的對話在 bot_<名稱>.txt）。
 """
 import argparse
 import json
@@ -21,6 +21,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.environ.get("FINETUNE_OUT") or os.path.join(HERE, "outputs")  # 存結果的地方（Colab 上是 Google Drive）
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
@@ -140,7 +141,7 @@ def main():
     if args.limit:
         rows = rows[:args.limit]
     data_tag = os.path.splitext(os.path.basename(args.data))[0]
-    os.makedirs(os.path.join(HERE, "outputs"), exist_ok=True)
+    os.makedirs(OUT, exist_ok=True)
 
     llm = None
     if args.teacher:
@@ -160,7 +161,7 @@ def main():
 
     summary, lines = score(rows, preds)
     summary = [f"模型：{'老師（35B，收集時的答案）' if args.teacher else args.model}｜資料：{data_tag}"] + summary + extra
-    path = os.path.join(HERE, "outputs", f"eval_{tag}_{data_tag}.txt")
+    path = os.path.join(OUT, f"eval_{tag}_{data_tag}.txt")
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(summary) + "\n\n" + "\n".join(lines) + "\n")
     print("\n".join(summary))
@@ -194,7 +195,7 @@ def run_bot(llm, off: str, tag: str):
             out.append(f"\n👤 {text}\n\n{reply}\n" + (f"\n✗ {'；'.join(problems)}\n" if problems else ""))
             if problems:
                 failed.append(f"【{case['title']}】{text} → {'；'.join(problems)}")
-    path = os.path.join(HERE, "outputs", f"bot_{tag}.txt")
+    path = os.path.join(OUT, f"bot_{tag}.txt")
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"關掉的規則：{off or '無'}｜{n_turns} 句、有問題 {len(failed)} 句\n\n" + "\n".join(failed)
                 + "\n\n" + "\n".join(out))

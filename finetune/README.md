@@ -20,6 +20,12 @@
 
 虛擬機上用**原本的 python**（`/opt/venv_torch`，有 torch、unsloth），不是跑 API 用的 `~/venvs/foodbot`。
 
+## 在 Colab 上跑（虛擬機的 GPU 沒空時）
+
+打開 [colab_finetune.ipynb](colab_finetune.ipynb)（GitHub 上這個檔案有「Open in Colab」，或到 colab.research.google.com
+「上傳筆記本」），執行階段選 T4 GPU，「全部執行」。會做：基準 4B 評估 → 微調 → 微調後評估（含整個機器人跑情境）
+→ 打包 `results.zip`。每一步的結果存在 Google Drive，斷線後再全部執行一次會跳過做完的步驟、訓練從存檔點接著跑。
+
 ## 資料怎麼來
 
 - **訓練**：`dialogues.py` 用元件隨機組出對話（地區／捷運站、類型的各種說法、人數、預算、其他條件，加上換一批、

@@ -7,7 +7,8 @@
     python finetune/train.py --dry-run          # 只整理資料、看長度，不載入模型、不用 GPU
     python finetune/train.py --steps 300        # 開始訓練（會先檢查 GPU 有沒有足夠的空間）
 
-訓練好的 LoRA 存在 finetune/outputs/<名稱>/（不進 git）。
+訓練好的 LoRA 存在 finetune/outputs/<名稱>/（不進 git；環境變數 FINETUNE_OUT 可以改位置）。
+中斷後再跑一次，會從最後一個存檔點（每 50 步一個）接著訓練。
 """
 import argparse
 import json
@@ -15,6 +16,8 @@ import os
 import random
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# 存檔的地方：預設 finetune/outputs；Colab 上設成 Google Drive，斷線後資料還在
+OUT = os.environ.get("FINETUNE_OUT") or os.path.join(HERE, "outputs")
 # Qwen3.5 的對話模板：助理回答前面會先放一段空的思考（關閉思考模式時）。訓練只算這之後的 JSON
 RESPONSE_PART = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 INSTRUCTION_PART = "<|im_start|>user\n"
@@ -93,7 +96,7 @@ def main():
     def dataset(rs):
         return Dataset.from_list([{"text": to_text(tokenizer, r)} for r in rs])
 
-    out_dir = os.path.join(HERE, "outputs", args.name)
+    out_dir = os.path.join(OUT, args.name)
     trainer = SFTTrainer(
         model=model, tokenizer=tokenizer,
         train_dataset=dataset(train_rows), eval_dataset=dataset(val_rows),
@@ -112,7 +115,12 @@ def main():
     )
     # 只訓練助理的回答（JSON），不訓練系統提示詞和使用者的話
     trainer = train_on_responses_only(trainer, instruction_part=INSTRUCTION_PART, response_part=RESPONSE_PART)
-    trainer.train()
+    # 上次斷在一半：從最後一個存檔點接著訓練
+    ckpt_dir = out_dir + "-checkpoints"
+    resume = os.path.isdir(ckpt_dir) and any(d.startswith("checkpoint-") for d in os.listdir(ckpt_dir))
+    if resume:
+        print(f"從 {ckpt_dir} 的存檔點接著訓練")
+    trainer.train(resume_from_checkpoint=resume or None)
 
     model.save_pretrained(out_dir)
     tokenizer.save_pretrained(out_dir)
