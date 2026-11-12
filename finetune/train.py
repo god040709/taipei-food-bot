@@ -20,10 +20,10 @@ RESPONSE_PART = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 INSTRUCTION_PART = "<|im_start|>user\n"
 
 
-def load_rows(path: str, include_corrected: bool) -> list:
+def load_rows(path: str) -> list:
+    """每一筆的答案都是程式修正後的 JSON（labels.py），老師讀錯的地方也已經改成正確的，全部都拿來訓練。"""
     with open(path, encoding="utf-8") as f:
-        rows = [json.loads(line) for line in f if line.strip()]
-    return [r for r in rows if include_corrected or not r["corrected"]]
+        return [json.loads(line) for line in f if line.strip()]
 
 
 def to_text(tokenizer, row: dict) -> str:
@@ -54,12 +54,11 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--rank", type=int, default=16, help="LoRA 的大小")
     ap.add_argument("--max-len", type=int, default=4096)
-    ap.add_argument("--include-corrected", action="store_true", help="程式有修正過的也拿來訓練（不建議）")
     ap.add_argument("--min-free-gb", type=float, default=10, help="GPU 空間不到這麼多就不開始（GPU 是共用的）")
     ap.add_argument("--dry-run", action="store_true", help="只整理資料，不訓練")
     args = ap.parse_args()
 
-    rows = load_rows(args.data, args.include_corrected)
+    rows = load_rows(args.data)
     train_rows, val_rows = split_by_dialogue(rows, 0.1)
     print(f"資料：{len(rows)} 筆（訓練 {len(train_rows)}、驗證 {len(val_rows)}）")
 

@@ -1,15 +1,16 @@
 """
 評估小模型解析條件的能力（在虛擬機上跑，用 /opt/venv_torch 的 python）。
 
-拿 finetune/data/eval.jsonl（tests/scenarios.py 的對話，說法跟訓練資料不同）逐筆讓小模型回答，跟答案比：
-  - 程式沒修正的那幾筆：答案＝老師（35B）的 JSON
-  - 程式有修正的那幾筆：四個基本欄位跟「程式修正後」的值比，看小模型會不會犯老師一樣的錯
+拿評估資料（說法跟訓練資料不同）逐筆讓模型回答，跟標準答案（程式修正後的 JSON，見 labels.py）比。
+另外統計「老師（35B）讀錯、程式修正過」的那些欄位，這個模型有沒有讀對。
 
 用法：
+    python finetune/evaluate.py --teacher                               # 老師（35B）的分數，不用 GPU
     python finetune/evaluate.py --model unsloth/Qwen3.5-4B              # 沒微調的小模型（基準）
     python finetune/evaluate.py --model finetune/outputs/parser-lora     # 微調後
     python finetune/evaluate.py --model finetune/outputs/parser-lora --bot   # 另外讓整個機器人用小模型跑一遍情境
-結果寫在 finetune/outputs/eval_<名稱>.txt（--bot 的對話在 bot_<名稱>.txt）。
+    （加 --data finetune/data/cases.jsonl 換第二份評估資料）
+結果寫在 finetune/outputs/eval_<名稱>_<資料>.txt（--bot 的對話在 bot_<名稱>.txt）。
 """
 import argparse
 import json
@@ -82,79 +83,87 @@ def norm(field, value, names=None):
     return value if value not in ("", []) else None
 
 
+def score(rows: list, preds: list) -> tuple:
+    """preds：每一筆的 JSON（dict，格式錯誤是 None）。回傳 (摘要的幾行, 錯誤細節的幾行)。
+    答案是程式修正後的 JSON（labels.py）；changed 不是空的那幾筆＝老師（35B）讀錯、程式修正過的。"""
+    fields = SCALARS + SETS
+    hit = {f: 0 for f in fields}
+    json_ok = all_core = hard_ok = hard_total = 0
+    lines = []
+    for r, pred in zip(rows, preds):
+        json_ok += pred is not None
+        pred = pred or {}
+        names = recent_names(r["messages"])
+        label = json.loads(r["label"])
+        wrong = []
+        for f in fields:
+            ok = norm(f, pred.get(f), names) == norm(f, label.get(f), names)
+            hit[f] += ok
+            if not ok:
+                wrong.append(f"{f}：答案 {label.get(f)}／模型 {pred.get(f)}")
+        all_core += all(norm(f, pred.get(f)) == norm(f, label.get(f)) for f in ["intent"] + CORE)
+        for f in r.get("changed", []):  # 老師讀錯的欄位，這個模型有沒有讀對
+            hard_total += 1
+            hard_ok += norm(f, pred.get(f), names) == norm(f, label.get(f), names)
+        if wrong:
+            mark = "△" if r.get("changed") else "✗"
+            lines.append(f"{mark} {r['dialogue_id']} 第{r['turn']}句「{r['user']}」"
+                         + "".join("\n    " + w for w in wrong))
+    n = max(1, len(rows))
+    summary = [
+        f"評估 {len(rows)} 筆（其中老師讀錯、程式修正過的 {sum(bool(r.get('changed')) for r in rows)} 筆）",
+        f"JSON 格式正確：{json_ok}/{len(rows)}",
+        f"意圖＋四個基本欄位全對：{all_core}/{len(rows)}（{all_core / n:.0%}）",
+        "各欄位正確率：" + "、".join(f"{f} {hit[f] / n:.0%}" for f in fields),
+        f"老師讀錯的欄位：這個模型讀對 {hard_ok}/{hard_total}",
+    ]
+    return summary, lines
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", required=True, help="基準模型名稱，或 finetune/outputs/ 底下的 LoRA 資料夾")
+    ap.add_argument("--model", help="基準模型名稱，或 finetune/outputs/ 底下的 LoRA 資料夾")
+    ap.add_argument("--teacher", action="store_true", help="評估老師（35B）收集時的答案，不用 GPU")
     ap.add_argument("--data", default=os.path.join(HERE, "data", "eval.jsonl"))
     ap.add_argument("--limit", type=int, default=0, help="只評估前幾筆（試跑用）")
     ap.add_argument("--bot", action="store_true", help="另外讓整個機器人用小模型跑 tests/scenarios.py")
     ap.add_argument("--min-free-gb", type=float, default=6)
     args = ap.parse_args()
-
-    import torch
-    free = torch.cuda.mem_get_info()[0] / 1024 ** 3
-    if free < args.min_free_gb:
-        raise SystemExit(f"GPU 只剩 {free:.1f} GB（需要 {args.min_free_gb} GB），可能有人在用，晚點再跑")
+    if not (args.model or args.teacher):
+        ap.error("要指定 --model 或 --teacher")
 
     with open(args.data, encoding="utf-8") as f:
         rows = [json.loads(line) for line in f if line.strip()]
     if args.limit:
         rows = rows[:args.limit]
-    llm = LocalModel(args.model)
-    tag = os.path.basename(os.path.normpath(args.model)).replace("/", "_")
+    data_tag = os.path.splitext(os.path.basename(args.data))[0]
     os.makedirs(os.path.join(HERE, "outputs"), exist_ok=True)
 
-    hit = {f: 0 for f in SCALARS + SETS}
-    clean = [r for r in rows if not r["corrected"]]
-    corrected = [r for r in rows if r["corrected"]]
-    json_ok = all_core = fixed_like_program = same_as_teacher = 0
-    lines = []
-    for r in rows:
-        raw = llm.generate(r["messages"])
-        pred = extract_json(raw)
-        json_ok += pred is not None
-        pred = pred or {}
-        names = recent_names(r["messages"])
-        label = json.loads(r["label"])
-        if not r["corrected"]:
-            wrong = []
-            for f in SCALARS + SETS:
-                ok = norm(f, pred.get(f), names) == norm(f, label.get(f), names)
-                hit[f] += ok
-                if not ok:
-                    wrong.append(f"{f}：答案 {label.get(f)}／小模型 {pred.get(f)}")
-            all_core += all(norm(f, pred.get(f)) == norm(f, label.get(f)) for f in ["intent"] + CORE)
-            if wrong:
-                lines.append(f"✗ {r['dialogue_id']} 第{r['turn']}句「{r['user']}」\n    " + "\n    ".join(wrong))
-        else:
-            # 程式有修正：差異的欄位，小模型是跟程式修正後一樣（好），還是跟老師一樣（同樣讀錯）
-            for f in r["differs"]:
-                if pred.get(f) == r["final"][f]:
-                    fixed_like_program += 1
-                elif pred.get(f) == label.get(f):
-                    same_as_teacher += 1
-            lines.append(f"△ {r['dialogue_id']} 第{r['turn']}句「{r['user']}」程式修正 {r['differs']} {r['notes']}："
-                         f"老師 {[label.get(f) for f in r['differs']]}／程式 {[r['final'][f] for f in r['differs']]}"
-                         f"／小模型 {[pred.get(f) for f in r['differs']]}")
+    llm = None
+    if args.teacher:
+        tag = "teacher"
+        preds = [json.loads(r["teacher"]) for r in rows]
+        extra = []
+    else:
+        import torch
+        free = torch.cuda.mem_get_info()[0] / 1024 ** 3
+        if free < args.min_free_gb:
+            raise SystemExit(f"GPU 只剩 {free:.1f} GB（需要 {args.min_free_gb} GB），可能有人在用，晚點再跑")
+        llm = LocalModel(args.model)
+        tag = os.path.basename(os.path.normpath(args.model)).replace("/", "_")
+        preds = [extract_json(llm.generate(r["messages"])) for r in rows]
+        seconds = sorted(llm.seconds)
+        extra = [f"每句花費：中位數 {seconds[len(seconds) // 2]:.1f} 秒、最慢 {seconds[-1]:.1f} 秒"] if seconds else []
 
-    n_diff = sum(len(r["differs"]) for r in corrected)
-    seconds = sorted(llm.seconds)
-    summary = [
-        f"模型：{args.model}",
-        f"評估 {len(rows)} 筆（老師答案可信的 {len(clean)} 筆、程式有修正的 {len(corrected)} 筆）",
-        f"JSON 格式正確：{json_ok}/{len(rows)}",
-        f"意圖＋四個基本欄位全對：{all_core}/{len(clean)}",
-        "各欄位正確率：" + "、".join(f"{f} {hit[f] / max(1, len(clean)):.0%}" for f in SCALARS + SETS),
-        f"程式有修正的欄位共 {n_diff} 個：小模型跟程式修正後一樣 {fixed_like_program}、跟老師一樣讀錯 {same_as_teacher}",
-        f"每句花費：中位數 {seconds[len(seconds) // 2]:.1f} 秒、最慢 {seconds[-1]:.1f} 秒" if seconds else "",
-    ]
-    path = os.path.join(HERE, "outputs", f"eval_{tag}.txt")
+    summary, lines = score(rows, preds)
+    summary = [f"模型：{'老師（35B，收集時的答案）' if args.teacher else args.model}｜資料：{data_tag}"] + summary + extra
+    path = os.path.join(HERE, "outputs", f"eval_{tag}_{data_tag}.txt")
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(summary) + "\n\n" + "\n".join(lines) + "\n")
     print("\n".join(summary))
     print(f"細節：{path}")
 
-    if args.bot:
+    if args.bot and llm:
         from bot import Bot
         bot = Bot(llm)
         bot.valves.USE_LLM_REASON = False
