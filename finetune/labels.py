@@ -26,6 +26,8 @@ def gold_label(raw: dict, trace: dict, reply: str, last_text: str) -> dict:
 
     # 不喜歡／保留的店：只能是推薦過的店名（還沒推薦時 LLM 會填「第5間」）
     g["reject"], g["keep"] = d.get("reject", []), d.get("keep", [])
+    if raw.get("intent") == "chat":
+        return chat_label(raw, g)
 
     # 地區、類型、人數：程式最後採用的值（包含老師漏掉、由前文沿用的）
     for f, v in zip(FIELDS[:3], final[:3]):
@@ -66,6 +68,12 @@ def gold_label(raw: dict, trace: dict, reply: str, last_text: str) -> dict:
     g["waived"] = [f for f in g.get("waived") or [] if final[FIELDS.index(f)] is None] \
         if all(f in FIELDS for f in g.get("waived") or []) else []
     return g
+
+
+def chat_label(raw: dict, gold: dict) -> dict:
+    """閒聊（「謝謝」「股票會漲嗎」）：照老師的答案，不把前面的條件填進來（閒聊時程式不看條件，
+    填了反而教小模型閒聊也要抄條件）；只保留程式整理過的店名。"""
+    return {**raw, "reject": gold.get("reject", []), "keep": gold.get("keep", [])}
 
 
 def changed_fields(raw: dict, gold: dict) -> list:

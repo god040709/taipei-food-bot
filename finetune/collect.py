@@ -10,6 +10,7 @@ changed 列出程式修正了哪些欄位（人工抽查就看這些）。
     python finetune/collect.py eval                   # tests/scenarios.py 的情境，當評估資料
     python finetune/collect.py cases                  # eval_cases.json 的 153 個情境（第二份評估資料）
     python finetune/collect.py focus --n 150          # 補強資料：針對小模型弱點的對話（dialogues.py 的 FocusGen）
+    python finetune/collect.py chat --n 30            # 補強閒聊：推薦完之後連續兩句閒聊
     python finetune/collect.py train --n 5 --max-calls 20   # 小量試跑
 中斷後再跑一次會接著做（已經收集過的對話會跳過）。
 """
@@ -54,6 +55,15 @@ class Recorder:
         return out
 
 
+def fix_dish(gold: dict, text: str) -> dict:
+    """補強資料裡的菜名（dialogues.py 的 DISHES）：類別由程式決定，不是「資料庫沒有的料理」。"""
+    from dialogues import known_dish
+    cat = known_dish(text)
+    if cat and gold.get("intent") != "chat" and not gold.get("choose_category"):
+        gold = {**gold, "category": cat, "unknown_food": None}
+    return gold
+
+
 def eval_dialogues() -> list:
     from scenarios import SCENARIOS
     return [(f"eval-{i:03d}", turns) for i, (_, turns) in enumerate(SCENARIOS)]
@@ -67,7 +77,7 @@ def case_dialogues() -> list:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("split", choices=["train", "focus", "eval", "cases"])
+    ap.add_argument("split", choices=["train", "focus", "chat", "eval", "cases"])
     ap.add_argument("--n", type=int, default=300, help="訓練對話的段數")
     ap.add_argument("--max-calls", type=int, default=1500, help="這次最多呼叫 LLM 幾次")
     ap.add_argument("--other-llm", action="store_true", help="反問、閒聊也用 LLM（比較像正式環境，呼叫次數約多一倍）")
@@ -86,6 +96,9 @@ def main():
     elif args.split == "focus":
         from dialogues import focus_dialogues
         dialogues = focus_dialogues(args.n)
+    elif args.split == "chat":
+        from dialogues import chat_dialogues
+        dialogues = chat_dialogues(args.n)
     elif args.split == "eval":
         dialogues = eval_dialogues()
     else:
@@ -114,7 +127,7 @@ def main():
                     if rec.last is None or trace.get("llm_raw") is None:
                         continue  # 這一句沒有走到 LLM 解析（例如「重新開始」）或 LLM 失敗
                     teacher = trace["llm_raw"]
-                    gold = gold_label(teacher, trace, reply, text)
+                    gold = fix_dish(gold_label(teacher, trace, reply, text), text)
                     rows.append({
                         "dialogue_id": did, "turn": t, "user": text,
                         "messages": rec.last["messages"],

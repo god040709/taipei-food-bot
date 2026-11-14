@@ -234,6 +234,24 @@ class FocusGen(Gen):
         return [self.pick(MOODS) + "，" + self.full_request()]
 
 
+def chat_dialogues(n: int, seed: int = 11) -> list:
+    """補強閒聊：推薦完之後連續兩句閒聊或無關的問題（閒聊在訓練資料裡太少）。"""
+    gen, blocked, out = FocusGen(seed), eval_sentences(), []
+    while len(out) < n:
+        k = gen.pick([1, 2, 3, 4, 5])
+        chats = gen.r.sample(CHAT_AFTER + OFF_TOPIC, 2)
+        turns = [gen.full_request()] + [c.format(k=k) for c in chats]
+        if not any(t in blocked for t in turns):
+            out.append((f"chat-{len(out):04d}", turns))
+    return out
+
+
+def known_dish(text: str):
+    """句子裡有 DISHES 的菜名 → 那道菜的類別（只有一道時）；答案由程式決定，不用老師的（老師常說資料庫沒有）。"""
+    found = {c for c, dishes in DISHES.items() for d in dishes if d in text}
+    return found.pop() if len(found) == 1 else None
+
+
 def eval_sentences() -> set:
     """評估情境裡使用者說過的每一句（產生訓練資料時要避開）。"""
     import json

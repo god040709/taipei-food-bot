@@ -54,7 +54,7 @@ def gpu_free_gb() -> float:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default=",".join(os.path.join(HERE, "data", f) for f in ("train.jsonl", "focus.jsonl")),
+    ap.add_argument("--data", default=",".join(os.path.join(HERE, "data", f) for f in ("train.jsonl", "focus.jsonl", "chat.jsonl")),
                     help="訓練資料（逗號分隔多個檔案）")
     ap.add_argument("--model", default="unsloth/Qwen3.5-4B")
     ap.add_argument("--name", default="parser-lora", help="存檔的資料夾名稱")

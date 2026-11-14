@@ -8,7 +8,7 @@ from typing import Optional
 from recommender import BUDGET_STEP  # 預算的一個級距（200 元）
 from lexicon import (  # 詞庫、提示詞、文字處理
     ASK_MARK, BUDGET_MIN_WORDS, BUDGET_UP_WORDS, CATEGORIES, CATEGORY_SYNONYMS, CHAT_MARK, CHOOSE_MARK, CN_INDEX, DISTRICTS,
-    FIELDS, FIELD_SKIP_WORDS, MORE_WORDS, NEG_AFTER_RE, NEG_BEFORE_RE, NUM, PARSE_PROMPT, PERSON_PREFS,
+    FIELDS, FIELD_SKIP_WORDS, MORE_WORDS, NEG_AFTER_RE, NEG_BEFORE_RE, NEG_JOIN_RE, NUM, PARSE_PROMPT, PERSON_PREFS,
     PREF_OFF_WORDS, REJECT_SOFT, REJECT_STRONG, RELAXES, RELAX_LABELS, SKIP_WORDS, SORTS, STYLE_WORDS,
     SUBTYPES, TOTAL_WORDS, UNSURE_WORDS, as_list, find_near, fix_homophones, to_number,
 )
@@ -252,7 +252,7 @@ class UnderstandMixin:
         words += [(w, c, False) for c, ws in CATEGORY_SYNONYMS.items() for w in ws]
         words += [(t, parent, True) for parent, triggers, _, _ in SUBTYPES.values() for t in triggers]
         taken = [False] * len(text)
-        found = []
+        found, ends, subs = [], {}, {}
         for word, cat, is_sub in sorted(words, key=lambda w: -len(w[0])):
             w = word.lower()
             start = lower.find(w)
@@ -269,8 +269,18 @@ class UnderstandMixin:
                     neg = (re.search(NEG_BEFORE_RE, text[max(0, start - 6):start]) is not None
                            or re.match(NEG_AFTER_RE, text[end:end + 5]) is not None)
                     found.append((start, cat, neg and not is_sub))  # 「不要麻辣鍋」不代表整個火鍋類都不要
+                    ends[start], subs[start] = end, is_sub
                 start = lower.find(w, end)
-        return sorted(found)
+        found.sort()
+        # 「義式和中式都不要」「不要火鍋跟燒肉」：用「和、跟」連在一起的類別，其中一個是「不要」，另一個也是
+        # （子類型的「不要」本來就不算，這裡也不傳）
+        for _ in range(2):  # 往前、往後各傳一次
+            for i in range(len(found) - 1):
+                (s1, c1, n1), (s2, c2, n2) = found[i], found[i + 1]
+                between = text[ends[s1]:s2]
+                if n1 != n2 and re.match(NEG_JOIN_RE, between) and not (subs[s1] or subs[s2]):
+                    found[i], found[i + 1] = (s1, c1, True), (s2, c2, True)
+        return found
 
     def rule_prefs(self, text: str) -> dict:
         """規則判斷的其他條件，都是 LLM 實測讀錯過、留著當保險的（沒有 LLM 時也用得到）：

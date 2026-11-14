@@ -10,6 +10,7 @@
 | 步驟 | 在哪裡跑 | 指令 |
 |---|---|---|
 | 1. 收集訓練資料 | 本機（需要 `LLM_API_KEY`） | `python finetune/collect.py train --n 300` |
+| 1b. 補強資料（第二輪） | 本機 | `python finetune/collect.py focus --n 150`、`python finetune/collect.py chat --n 30` |
 | 2. 收集評估資料 | 本機 | `python finetune/collect.py eval` |
 | 2b. 第二份評估資料 | 本機 | `python finetune/collect.py cases` |
 | 2c. 老師（35B）的分數 | 本機或虛擬機（不用 GPU） | `python finetune/evaluate.py --teacher` |
@@ -35,6 +36,8 @@
   （例如「2人 500 貴一點沒差」被當成總預算），答案寫的是修正後的值。這樣小模型才有機會「本來就做對」，
   之後對應的規則才有理由拿掉。每一筆的 `changed` 列出修正了哪些欄位，人工抽查就看這些。
 - 第二份評估資料 `eval_cases.json`：附預期結果的 153 個情境（`python finetune/collect.py cases`）。
+- 第三份 `eval_cases2.json`：第一輪微調之後才寫的 44 個情境，句子跟所有訓練資料都不重複，用來公平比較第一輪和第二輪（`evaluate.py --bot-only --cases finetune/eval_cases2.json`）。
+- 補強資料（第二輪）：`focus.jsonl` 針對第一輪的弱點（閒聊、無關問題、排除的說法、菜名、台北以外、排序、沒想法），`chat.jsonl` 補閒聊；菜名的類別由程式決定（`collect.py` 的 `fix_dish`），閒聊的答案不填前面的條件（`labels.py` 的 `chat_label`）。
 - 老師自己的分數不用 GPU 就能算：`python finetune/evaluate.py --teacher`。
 - 收集時反問、閒聊不呼叫 LLM（機器人改用固定句子），每句大約只花 1 次呼叫。
 

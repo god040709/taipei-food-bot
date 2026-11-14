@@ -11,7 +11,8 @@
     python finetune/evaluate.py --model finetune/outputs/parser-lora --bot   # 另外讓整個機器人用小模型跑情境、對答案
     python finetune/evaluate.py --model finetune/outputs/parser-lora --bot --off total_words,category_name
                                                                          # 關掉某些保險規則再跑，看還需不需要
-    （加 --data finetune/data/cases.jsonl 換第二份評估資料）
+    （加 --data finetune/data/cases.jsonl 換第二份評估資料；
+      --cases finetune/eval_cases2.json 換 --bot 的情境檔；--bot-only 只跑情境）
 結果寫在 finetune/outputs/（環境變數 FINETUNE_OUT 可以改）的 eval_<名稱>_<資料>.txt（--bot 的對話在 bot_<名稱>.txt）。
 """
 import argparse
@@ -132,6 +133,7 @@ def main():
     ap.add_argument("--bot", action="store_true", help="另外讓整個機器人用這個模型跑 eval_cases.json，逐句對答案")
     ap.add_argument("--off", default="", help="--bot 時關掉的保險規則（逗號分隔，名稱見 src/understand.py 的 GUARDS）")
     ap.add_argument("--cases", default=os.path.join(HERE, "eval_cases.json"), help="--bot 用的情境檔")
+    ap.add_argument("--bot-only", action="store_true", help="只跑 --bot 的情境，不逐筆比對條件（省時間）")
     ap.add_argument("--min-free-gb", type=float, default=6)
     args = ap.parse_args()
     if not (args.model or args.teacher):
@@ -156,19 +158,20 @@ def main():
             raise SystemExit(f"GPU 只剩 {free:.1f} GB（需要 {args.min_free_gb} GB），可能有人在用，晚點再跑")
         llm = LocalModel(args.model)
         tag = os.path.basename(os.path.normpath(args.model)).replace("/", "_")
-        preds = [extract_json(llm.generate(r["messages"])) for r in rows]
+        preds = [] if args.bot_only else [extract_json(llm.generate(r["messages"])) for r in rows]
         seconds = sorted(llm.seconds)
         extra = [f"每句花費：中位數 {seconds[len(seconds) // 2]:.1f} 秒、最慢 {seconds[-1]:.1f} 秒"] if seconds else []
 
-    summary, lines = score(rows, preds)
-    summary = [f"模型：{'老師（35B，收集時的答案）' if args.teacher else args.model}｜資料：{data_tag}"] + summary + extra
-    path = os.path.join(OUT, f"eval_{tag}_{data_tag}.txt")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(summary) + "\n\n" + "\n".join(lines) + "\n")
-    print("\n".join(summary))
-    print(f"細節：{path}")
+    if not args.bot_only:
+        summary, lines = score(rows, preds)
+        summary = [f"模型：{'老師（35B，收集時的答案）' if args.teacher else args.model}｜資料：{data_tag}"] + summary + extra
+        path = os.path.join(OUT, f"eval_{tag}_{data_tag}.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(summary) + "\n\n" + "\n".join(lines) + "\n")
+        print("\n".join(summary))
+        print(f"細節：{path}")
 
-    if args.bot:
+    if args.bot or args.bot_only:
         if llm is None:  # 老師：真的呼叫 35B（需要 LLM_API_KEY），反問措辭、閒聊不呼叫，跟小模型的條件一樣
             from collect import Recorder
             from llm import DirectLLM
