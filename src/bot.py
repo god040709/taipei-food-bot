@@ -136,8 +136,16 @@ class Bot(UnderstandMixin, MemoryMixin, DialogueMixin, RenderMixin):
 
         # 不是要新推薦（問你會做什麼、道謝、閒聊、問細節）→ LLM 自然回覆。
         # 這句話有提到任何條件就當成找餐廳，避免把需求誤判成閒聊
-        if info["intent"] == "chat" and not rejects and not self.wants_more(user_text) and not new_search \
-                and not info["choose_category"]:  # 「你幫我挑一種料理」是要找餐廳，不是閒聊
+        # 剛推薦完說「嗯」「好」「幫我寫作業」：LLM 判斷成找店，但這句話沒有任何新的東西（條件跟上次推薦一樣、
+        # 沒有其他偏好、沒指定店）→ 重列一樣的店沒有意義，也當成閒聊。上一則是反問（在回答問題）或閒聊時不算
+        after_rec = bool(last_names) and "🔎 搜尋條件：" in prev_msg and not prev_msg.startswith((ASK_MARK, CHAT_MARK))
+        nothing_new = (info["intent"] == "search" and after_rec and not reject_said and not keep_rest
+                       and not info["llm_waived"] and not info["outside_area"] and not info["unknown_food"]
+                       and tuple(conditions) == self.previous_conditions(messages))
+        if (info["intent"] == "chat" or nothing_new) and not rejects and not self.wants_more(user_text) \
+                and not new_search and not info["choose_category"]:  # 「你幫我挑一種料理」是要找餐廳，不是閒聊
+            if nothing_new:
+                self.note("LLM 判斷是找店，但這句話沒有新的條件，當成閒聊")
             reply = self.chat_reply(messages)
             if reply:
                 return CHAT_MARK + reply

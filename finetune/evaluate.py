@@ -131,6 +131,7 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="只評估前幾筆（試跑用）")
     ap.add_argument("--bot", action="store_true", help="另外讓整個機器人用這個模型跑 eval_cases.json，逐句對答案")
     ap.add_argument("--off", default="", help="--bot 時關掉的保險規則（逗號分隔，名稱見 src/understand.py 的 GUARDS）")
+    ap.add_argument("--cases", default=os.path.join(HERE, "eval_cases.json"), help="--bot 用的情境檔")
     ap.add_argument("--min-free-gb", type=float, default=6)
     args = ap.parse_args()
     if not (args.model or args.teacher):
@@ -172,17 +173,22 @@ def main():
             from collect import Recorder
             from llm import DirectLLM
             llm = Recorder(DirectLLM(max_calls=600), other=False)
-        run_bot(llm, args.off, f"{tag}{'_off-' + args.off.replace(',', '+') if args.off else ''}")
+        cases_tag = os.path.splitext(os.path.basename(args.cases))[0]
+        cases_tag = "" if cases_tag == "eval_cases" else "_" + cases_tag
+        run_bot(llm, args.off, f"{tag}{cases_tag}{'_off-' + args.off.replace(',', '+') if args.off else ''}", args.cases)
 
 
-def run_bot(llm, off: str, tag: str):
-    """整個機器人用這個模型解析，跑 eval_cases.json 的情境，每一句對答案（checks.py）。"""
+def run_bot(llm, off: str, tag: str, cases_path: str):
+    """整個機器人用這個模型解析，跑情境檔，每一句對答案（checks.py）。
+    只比較「解析條件」：閒聊的回覆換成固定句子（不然小模型寫不出閒聊，機器人會改成照舊列店，看起來像判斷錯）；
+    推薦理由用程式寫（USE_LLM_REASON=False），「理由崩壞」跟模型無關，另外計數。"""
     from bot import Bot
     from checks import check
     bot = Bot(llm, {"OFF_GUARDS": off, "USE_LLM_REASON": False})
-    with open(os.path.join(HERE, "eval_cases.json"), encoding="utf-8") as f:
+    bot.chat_reply = lambda messages: "（閒聊回覆）"
+    with open(cases_path, encoding="utf-8") as f:
         cases = json.load(f)
-    out, failed, n_turns = [], [], 0
+    out, failed, n_turns, n_reason = [], [], 0, 0
     for case in cases:
         messages = []
         out.append(f"{'=' * 60}\n【{case['title']}】")
@@ -192,14 +198,19 @@ def run_bot(llm, off: str, tag: str):
             messages.append({"role": "assistant", "content": reply})
             n_turns += 1
             problems = check(reply, expect)
-            out.append(f"\n👤 {text}\n\n{reply}\n" + (f"\n✗ {'；'.join(problems)}\n" if problems else ""))
+            reason = [p for p in problems if p.startswith("理由崩壞")]
+            problems = [p for p in problems if not p.startswith("理由崩壞")]
+            n_reason += bool(reason)
+            out.append(f"\n👤 {text}\n\n{reply}\n"
+                       + (f"\n✗ {'；'.join(problems + reason)}\n" if problems + reason else ""))
             if problems:
                 failed.append(f"【{case['title']}】{text} → {'；'.join(problems)}")
     path = os.path.join(OUT, f"bot_{tag}.txt")
+    summary = (f"情境：{os.path.basename(cases_path)}｜關掉的規則：{off or '無'}｜{n_turns} 句、有問題 {len(failed)} 句"
+               f"（另有推薦理由太短 {n_reason} 句，跟模型無關）")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(f"關掉的規則：{off or '無'}｜{n_turns} 句、有問題 {len(failed)} 句\n\n" + "\n".join(failed)
-                + "\n\n" + "\n".join(out))
-    print(f"整個機器人（關掉的規則：{off or '無'}）：{n_turns} 句、有問題 {len(failed)} 句 → {path}")
+        f.write(summary + "\n\n" + "\n".join(failed) + "\n\n" + "\n".join(out))
+    print(f"整個機器人：{summary} → {path}")
 
 
 if __name__ == "__main__":
