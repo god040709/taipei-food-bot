@@ -148,6 +148,116 @@ class Gen:
         return turns
 
 
+# ---- 補強資料：針對第一次微調後小模型的弱點（閒聊、無關問題、排除的說法、菜名、範圍外、排序、沒想法） ----
+# 評估情境（tests/scenarios.py、eval_cases.json）裡出現過的句子會自動排除，避免模型背答案
+DISHES = {
+    "泰式料理": ["綠咖哩", "月亮蝦餅", "冬蔭功", "泰式炒河粉", "涼拌青木瓜", "椒麻雞"],
+    "日式料理": ["握壽司", "天婦羅", "烏龍麵", "蕎麥麵", "親子丼", "章魚燒"],
+    "韓式料理": ["石鍋拌飯", "辣炒年糕", "人蔘雞湯", "海鮮煎餅", "韓式燉雞"],
+    "義式料理": ["燉飯", "千層麵", "青醬麵", "焗烤"],
+    "美式餐廳": ["烤肋排", "熱狗堡", "水牛城雞翅"],
+    "中式餐廳": ["東坡肉", "宮保雞丁", "麻婆豆腐", "糖醋排骨", "北京烤鴨"],
+    "平價小吃": ["蚵仔煎", "肉圓", "大腸麵線", "鹽酥雞", "胡椒餅", "滷味"],
+    "早午餐": ["班尼迪克蛋", "法式吐司", "貝果"],
+    "火鍋": ["鍋物", "牛奶鍋", "番茄鍋"],
+    "拉麵": ["味噌拉麵", "醬油拉麵", "家系拉麵"],
+    "小籠包": ["蟹黃小籠", "鮮肉小籠"],
+    "甜點": ["提拉米蘇", "舒芙蕾", "可麗餅", "芒果冰"],
+}
+OUTSIDE = ["板橋", "新莊", "中和", "新店", "土城", "蘆洲", "林口", "樹林", "桃園", "基隆", "新竹", "台中", "高雄"]
+SORTS = ["想吃高檔一點", "要吃好一點的", "預算不是問題 要好吃", "想奢侈一下", "找最便宜的", "省錢為主",
+         "要評價最好的", "不想踩雷", "要排隊名店", "人氣最旺的", "最近的那幾間"]
+CHAT_AFTER = ["好喔", "嗯嗯", "OK", "了解", "收到", "讚", "太好了", "酷耶", "哈哈", "辛苦了", "謝啦", "3Q",
+              "你人真好", "第{k}間要訂位嗎", "第{k}間有停車場嗎", "第{k}間怎麼去", "第{k}間貴不貴",
+              "你最推哪間", "哪一間比較適合約會", "這些你都吃過嗎", "你是機器人嗎", "你叫什麼名字",
+              "你是誰做的", "你怎麼知道這些店的", "幫我訂位", "可以外帶嗎"]
+OFF_TOPIC = ["幫我寫數學作業", "3加5等於多少", "明天天氣如何", "推薦一部電影", "幫我翻譯hello", "你會寫程式嗎",
+             "教我煮咖哩", "台北101有多高", "股票會漲嗎", "講個笑話", "我好無聊", "今天好累", "我失戀了",
+             "幫我寫情書", "asdfgh", "？？？", "😂", "hello", "how are you", "你好", "嗨", "在嗎", "早安"]
+AVOID_NOW = ["{c}以外的都可以", "除了{c}其他都好", "{c}先不要", "這次跳過{c}", "{c}最近吃太多了", "{c}有點吃膩",
+             "對{c}沒什麼胃口", "上禮拜才吃{c}", "{c}吃到不想再吃", "不想再看到{c}了", "{c}就算了吧",
+             "{c}今天不考慮"]
+AVOID_FIRST = ["除了{c}什麼都可以", "{c}以外都可以", "不吃{c}", "不要{c}", "{c}跟{c2}以外都行", "{c}和{c2}都不要"]
+UNSURE = ["還沒想好欸", "不曉得", "想不到", "沒什麼想法", "你問倒我了"]
+CHOOSE = ["你幫我決定吃什麼", "想不到要吃什麼 你挑", "類型隨你", "吃什麼都好 你選"]
+MOODS = ["考完試想放鬆", "下班好累", "今天發薪水", "要幫朋友慶生", "第一次約會", "寫完報告了", "下雨天"]
+
+
+class FocusGen(Gen):
+    def meal_cat(self):
+        return self.pick([c for c in CATEGORIES if c not in ("酒吧", "甜點")])
+
+    def full_request(self, food=None, where=None, extra=None):
+        """四項條件都說的需求；food / where 可以換成指定的說法。"""
+        n_text, n = self.people()
+        parts = [where or self.where()[0], food if food is not None else self.food()[0], n_text, self.money(n)[0]]
+        parts = [p for p in parts if p]
+        if extra:
+            parts.append(extra)
+        return self.join(parts)
+
+    def no_food_request(self, extra):
+        n_text, n = self.people()
+        return self.join([self.where()[0], n_text, self.money(n)[0], extra])
+
+    def dialogue(self):
+        roll = self.r.random()
+        k = self.pick([1, 2, 3, 4, 5])
+        if roll < 0.22:  # 推薦完之後閒聊、問無關的事
+            turns = [self.full_request(), self.pick(CHAT_AFTER + OFF_TOPIC).format(k=k)]
+            if self.r.random() < 0.3:
+                turns.append(self.followup(None))
+            return turns
+        if roll < 0.32:  # 一開始就閒聊、問無關的事，之後才說需求
+            turns = [self.pick(OFF_TOPIC + ["你是誰", "你能幹嘛", "你會推薦什麼"])]
+            if self.r.random() < 0.6:
+                turns.append(self.full_request())
+            return turns
+        if roll < 0.52:  # 推薦完之後排除目前的類型（沒說換什麼）
+            c = self.meal_cat()
+            return [self.full_request(food=c), self.pick(AVOID_NOW).format(c=c)]
+        if roll < 0.62:  # 一開始就說不要哪些類型
+            c, c2 = self.r.sample([c for c in CATEGORIES if c not in ("酒吧", "甜點")], 2)
+            return [self.no_food_request(self.pick(AVOID_FIRST).format(c=c, c2=c2))]
+        if roll < 0.72:  # 菜名 → 類型
+            c = self.pick(DISHES)
+            dish = self.pick(DISHES[c])
+            return [self.full_request(food=self.pick([dish, f"想吃{dish}", f"來點{dish}"]))]
+        if roll < 0.79:  # 台北市以外的地點
+            place = self.pick(OUTSIDE)
+            return [self.full_request(where=self.pick([place, f"在{place}", f"{place}那邊"]))]
+        if roll < 0.86:  # 強調排序方式
+            return [self.full_request(extra=self.pick(SORTS))]
+        if roll < 0.93:  # 反問後說沒想法、要我挑
+            return [self.request(self.pick([1, 2]))[0], self.pick(UNSURE + CHOOSE)]
+        # 閒聊裡帶著需求（要找店，不是閒聊）
+        return [self.pick(MOODS) + "，" + self.full_request()]
+
+
+def eval_sentences() -> set:
+    """評估情境裡使用者說過的每一句（產生訓練資料時要避開）。"""
+    import json
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    from scenarios import SCENARIOS
+    out = {t for _, turns in SCENARIOS for t in turns}
+    for name in ("eval_cases.json", "eval_cases2.json"):
+        path = os.path.join(ROOT, "finetune", name)
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                out |= {t for c in json.load(f) for t in c["turns"]}
+    return out
+
+
+def focus_dialogues(n: int, seed: int = 7) -> list:
+    """補強資料：[(編號, [使用者的話…])]，跟評估情境重複的對話跳過。"""
+    gen, blocked, out = FocusGen(seed), eval_sentences(), []
+    while len(out) < n:
+        turns = gen.dialogue()
+        if not any(t in blocked for t in turns):
+            out.append((f"focus-{len(out):04d}", turns))
+    return out
+
+
 def training_dialogues(n: int, seed: int = 2026) -> list:
     """[(編號, [使用者的話…])]。同一個 seed 每次產生一樣的內容（收集可以中斷後接著跑）。"""
     gen = Gen(seed)

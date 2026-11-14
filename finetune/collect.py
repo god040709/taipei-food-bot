@@ -9,6 +9,7 @@ changed 列出程式修正了哪些欄位（人工抽查就看這些）。
     python finetune/collect.py train --n 300          # 產生 300 段訓練對話（finetune/dialogues.py）
     python finetune/collect.py eval                   # tests/scenarios.py 的情境，當評估資料
     python finetune/collect.py cases                  # eval_cases.json 的 153 個情境（第二份評估資料）
+    python finetune/collect.py focus --n 150          # 補強資料：針對小模型弱點的對話（dialogues.py 的 FocusGen）
     python finetune/collect.py train --n 5 --max-calls 20   # 小量試跑
 中斷後再跑一次會接著做（已經收集過的對話會跳過）。
 """
@@ -66,7 +67,7 @@ def case_dialogues() -> list:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("split", choices=["train", "eval", "cases"])
+    ap.add_argument("split", choices=["train", "focus", "eval", "cases"])
     ap.add_argument("--n", type=int, default=300, help="訓練對話的段數")
     ap.add_argument("--max-calls", type=int, default=1500, help="這次最多呼叫 LLM 幾次")
     ap.add_argument("--other-llm", action="store_true", help="反問、閒聊也用 LLM（比較像正式環境，呼叫次數約多一倍）")
@@ -82,6 +83,9 @@ def main():
     if args.split == "train":
         from dialogues import training_dialogues
         dialogues = training_dialogues(args.n)
+    elif args.split == "focus":
+        from dialogues import focus_dialogues
+        dialogues = focus_dialogues(args.n)
     elif args.split == "eval":
         dialogues = eval_dialogues()
     else:

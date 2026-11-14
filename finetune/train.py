@@ -23,10 +23,14 @@ RESPONSE_PART = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 INSTRUCTION_PART = "<|im_start|>user\n"
 
 
-def load_rows(path: str) -> list:
-    """每一筆的答案都是程式修正後的 JSON（labels.py），老師讀錯的地方也已經改成正確的，全部都拿來訓練。"""
-    with open(path, encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
+def load_rows(paths: str) -> list:
+    """paths：一個或多個資料檔（逗號分隔）。每一筆的答案都是程式修正後的 JSON（labels.py），
+    老師讀錯的地方也已經改成正確的，全部都拿來訓練。"""
+    rows = []
+    for path in paths.split(","):
+        with open(path.strip(), encoding="utf-8") as f:
+            rows += [json.loads(line) for line in f if line.strip()]
+    return rows
 
 
 def to_text(tokenizer, row: dict) -> str:
@@ -50,7 +54,8 @@ def gpu_free_gb() -> float:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default=os.path.join(HERE, "data", "train.jsonl"))
+    ap.add_argument("--data", default=",".join(os.path.join(HERE, "data", f) for f in ("train.jsonl", "focus.jsonl")),
+                    help="訓練資料（逗號分隔多個檔案）")
     ap.add_argument("--model", default="unsloth/Qwen3.5-4B")
     ap.add_argument("--name", default="parser-lora", help="存檔的資料夾名稱")
     ap.add_argument("--steps", type=int, default=300)
