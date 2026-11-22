@@ -196,12 +196,14 @@ class DialogueMixin:
                                     "（例如：" + "、".join(DISTRICTS[:4]) + "…，或說地區不限）")
 
     def ask_unknown_food(self, food: str, user_text: str) -> str:
-        """14 類以外的料理 → 說明沒有這一類，並建議相近的類別。"""
-        text = self.say("使用者想吃的料理不在資料的類別裡。請說明資料裡沒有這一類，並建議一到三個最相近的類別讓他選，"
-                        "也可以說類型不限。",
+        """14 類以外的料理、或一道具體的菜 → 說明，並建議相近的類別讓使用者選（資料只有店家類型、沒有菜單）。"""
+        text = self.say("使用者想吃的料理不在資料的類別裡：可能是資料沒有的料理類型，也可能是一道具體的菜"
+                        "（資料只有店家的類型、沒有菜單，不能確定哪幾家有賣）。請簡短說明，並建議一到三個"
+                        "最可能有這道菜、或最相近的類別讓他選，也可以說類型不限。",
                         [f"使用者剛剛說：「{user_text}」", f"想吃的料理：{food}",
                          f"資料裡的料理類型：{'、'.join(CATEGORIES)}"])
-        return ASK_MARK + (text or f"資料裡沒有「{food}」這一類。可以選的類型有：" + "、".join(CATEGORIES)
+        return ASK_MARK + (text or f"資料裡沒有「{food}」這一類（只有店家的類型，沒有菜單）。可以選的類型有："
+                                    + "、".join(CATEGORIES)
                                     + "，想改成哪一種？")
 
     def ask_no_subtype(self, subtype: str, category, where, overview: dict) -> str:

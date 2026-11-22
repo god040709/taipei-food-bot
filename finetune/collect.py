@@ -56,12 +56,13 @@ class Recorder:
         return out
 
 
-def fix_dish(gold: dict, text: str) -> dict:
-    """補強資料裡的菜名（dialogues.py 的 DISHES、DISHES3）：類別由程式決定，不是「資料庫沒有的料理」。"""
-    from dialogues import known_dish
-    cat = known_dish(text)
-    if cat and gold.get("intent") != "chat" and not gold.get("choose_category"):
-        gold = {**gold, "category": cat, "unknown_food": None}
+def fix_dish(gold: dict, text: str, rule_cat) -> dict:
+    """補強資料裡的菜名（dialogues.py 的 DISHES、DISHES3）：資料只有店家類型、沒有菜單，說菜名要反問想吃哪一類
+    → category 填 null、unknown_food 填菜名。菜名裡直接寫了類別（泰式烤雞、握壽司）就用規則讀到的類別（rule_cat）。"""
+    from dialogues import find_dish
+    dish = find_dish(text)
+    if dish and gold.get("intent") != "chat" and not gold.get("choose_category"):
+        gold = {**gold, "category": rule_cat, "unknown_food": None if rule_cat else dish}
     return gold
 
 
@@ -131,7 +132,7 @@ def main():
                     if rec.last is None or trace.get("llm_raw") is None:
                         continue  # 這一句沒有走到 LLM 解析（例如「重新開始」）或 LLM 失敗
                     teacher = trace["llm_raw"]
-                    gold = fix_dish(gold_label(teacher, trace, reply, text), text)
+                    gold = fix_dish(gold_label(teacher, trace, reply, text), text, bot.parse_user_query(text)[1])
                     rows.append({
                         "dialogue_id": did, "turn": t, "user": text,
                         "messages": rec.last["messages"],

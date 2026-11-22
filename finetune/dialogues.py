@@ -219,7 +219,7 @@ class FocusGen(Gen):
         if roll < 0.62:  # 一開始就說不要哪些類型
             c, c2 = self.r.sample([c for c in CATEGORIES if c not in ("酒吧", "甜點")], 2)
             return [self.no_food_request(self.pick(AVOID_FIRST).format(c=c, c2=c2))]
-        if roll < 0.72:  # 菜名 → 類型
+        if roll < 0.72:  # 菜名（答案：反問想吃哪一類，collect.py 的 fix_dish）
             c = self.pick(DISHES)
             dish = self.pick(DISHES[c])
             return [self.full_request(food=self.pick([dish, f"想吃{dish}", f"來點{dish}"]))]
@@ -235,7 +235,8 @@ class FocusGen(Gen):
 
 
 # ---- 第三輪補強：第二輪模型還會錯的（菜名、拐彎的排除、高檔沒說預算、取消不要連鎖被當閒聊、「我跟女友」） ----
-# 評估情境裡出現過的菜名（打拋豬、湯包、左宗棠雞…）刻意不放，才測得出模型是不是真的會舉一反三
+# 菜名：資料只有店家類型、沒有菜單，答案是反問想吃哪一類（collect.py 的 fix_dish）。
+# 評估情境裡出現過的菜名（打拋豬、左宗棠雞…）刻意不放，才測得出模型是不是真的會舉一反三
 DISHES3 = {
     "泰式料理": ["紅咖哩", "鳳梨炒飯", "泰式烤雞", "蝦醬空心菜"],
     "小籠包": ["燒賣", "蝦仁燒賣", "蒸餃"],
@@ -264,7 +265,7 @@ PAIRS3 = ["我跟女友", "我跟男友", "我和老婆", "我跟老公", "我�
 class Focus3Gen(FocusGen):
     def dialogue(self):
         roll = self.r.random()
-        if roll < 0.2:  # 菜名 → 類型（新的菜名）
+        if roll < 0.2:  # 菜名（新的菜名）→ 反問想吃哪一類
             c = self.pick(DISHES3)
             dish = self.pick(DISHES3[c])
             return [self.full_request(food=self.pick([dish, f"想吃{dish}", f"來點{dish}", f"突然想吃{dish}"]))]
@@ -309,9 +310,9 @@ def chat_dialogues(n: int, seed: int = 11) -> list:
     return out
 
 
-def known_dish(text: str):
-    """句子裡有 DISHES 的菜名 → 那道菜的類別（只有一道時）；答案由程式決定，不用老師的（老師常說資料庫沒有）。"""
-    found = {c for table in (DISHES, DISHES3) for c, dishes in table.items() for d in dishes if d in text}
+def find_dish(text: str):
+    """句子裡有 DISHES、DISHES3 的菜名 → 那道菜（只有一道時）。答案由程式決定，不用老師的（collect.py 的 fix_dish）。"""
+    found = {d for table in (DISHES, DISHES3) for dishes in table.values() for d in dishes if d in text}
     return found.pop() if len(found) == 1 else None
 
 
