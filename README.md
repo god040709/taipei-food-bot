@@ -51,72 +51,163 @@ collector_taipei.py    從 Google Places API (New) 採集資料
 | `tests/` | 對話情境測試（`run_scenarios.py`）與比對基準（`golden/`） |
 | `eval/` | 成效評估：測試問題與評估腳本 |
 
-## 快速開始
+## 快速開始（操作指南）
 
-### 1. 安裝套件
+照著做，大約 15 分鐘就能在 Open WebUI 上用機器人。所有指令都可以直接複製貼上。
+
+這份指南會用到兩個地方：
+- **🖥️ 虛擬機**：在自己電腦打開 PowerShell，連上實驗室的虛擬機，在那個黑色視窗裡打指令。
+- **🌐 瀏覽器**：Open WebUI 和 GitHub 的網頁。
+
+### 事前準備
+
+- 能登入實驗室的虛擬機。
+- 能登入實驗室的 Open WebUI，而且是**管理員**帳號（要新增函式）。
+- 自己的 LLM 金鑰：在虛擬機的 `.env` 檔案裡，`LLM_API_KEY=` 後面那一串。
+  - ⚠️ 金鑰不要貼到任何程式碼、聊天群組或 GitHub 上。
+
+### 第零步：連上虛擬機
+
+**📍 在哪裡打：自己電腦的 PowerShell**
+
+1. 按鍵盤左下角的 Windows 鍵，輸入 `PowerShell`，按 Enter 打開黑色（或藍色）視窗。
+2. 輸入平常連虛擬機的指令，例如：
+   ```
+   ssh lab-30-docker
+   ```
+   （每個人的指令可能不一樣，照實驗室給你的方式連。）
+3. 畫面開頭變成類似 `你的帳號@testbed:~$` 就是連上了。
+
+> 後面標「🖥️ 虛擬機」的指令，都是在這個視窗裡打。
+
+### 第一步：下載程式（只要做一次）
+
+**📍 在哪裡打：🖥️ 虛擬機（第零步連上的視窗）**
+
+依序貼上：
 
 ```bash
-pip install -r requirements.txt
+mkdir -p ~/projects
+cd ~/projects
+git clone -b god040709new https://github.com/leedidi0817-cmyk/taipei-food-bot.git
+cd taipei-food-bot
 ```
 
-Windows 若找不到 `pip`，改用 `python -m pip install -r requirements.txt`。
+> 在視窗裡貼上：按滑鼠右鍵，或按 `Ctrl + Shift + V`。
 
-### 2. 啟動推薦 API
+### 第二步：安裝需要的套件（只要做一次）
 
-**在自己電腦：**
+**📍 在哪裡打：🖥️ 虛擬機**
 
 ```bash
+python3 -m venv ~/venvs/foodbot
+~/venvs/foodbot/bin/pip install -r requirements.txt
+```
+
+最後看到 `Successfully installed ...` 就成功了。
+
+### 第三步：啟動機器人 API
+
+**📍 在哪裡打：🖥️ 虛擬機**
+
+```bash
+cd ~/projects/taipei-food-bot
+HOST=0.0.0.0 setsid nohup ~/venvs/foodbot/bin/python api.py >> api.log 2>&1 < /dev/null & disown
+```
+
+接著確認有沒有啟動成功，**📍 一樣在 🖥️ 虛擬機**：
+
+```bash
+curl -s -X POST localhost:5000/chat -H "Content-Type: application/json" -d '{"messages":[{"role":"user","content":"大安燒肉 2人 800"}]}'
+```
+
+有回一大段文字（餐廳推薦或反問）就是成功了。如果顯示 `Connection refused`，看第七步的「常見問題」。
+
+> API 會在背景一直跑，關掉這個視窗也沒關係。
+> `HOST=0.0.0.0` 一定要加，Open WebUI（另一個容器）才連得到。
+
+### 第四步：在 Open WebUI 加入機器人（只要做一次）
+
+**📍 在哪裡做：🌐 瀏覽器**
+
+1. 用瀏覽器打開 Open WebUI 並登入，點左下角頭像 → **管理員控制台** → **函式** → 右上角 **＋（建立）**。
+2. 開一個新分頁，打開 GitHub 上的這個檔案：
+   https://github.com/leedidi0817-cmyk/taipei-food-bot/blob/god040709new/openwebui_pipe.py
+   點程式碼右上角的「複製」圖示（兩個方框重疊的樣子），就能一次複製全部。
+3. 回到 Open WebUI 的分頁，把編輯框裡原本的內容全部刪掉（點進去按 `Ctrl + A` 再按 `Delete`），然後按 `Ctrl + V` 貼上。
+4. 名稱填 `台北美食機器人`，ID 填 `taipei_food_bot`，按**儲存**。
+5. 回到函式列表，把它右邊的**開關打開**。
+6. 點它右邊的**齒輪**，填這三項後儲存：
+
+| 設定 | 要填什麼 |
+|---|---|
+| Api Url | `http://testbed:5000/chat` |
+| Llm Api Key | 自己的 LLM 金鑰 |
+| Llm Model | `Qwen3.6-35B-A3B` |
+
+其他設定不用動。齒輪裡的 `Debug` 打開後，每則回覆最後會多一個「🔧 除錯資訊」，可以看到 LLM 讀出了什麼條件（平常不用開）。
+
+### 第五步：開始使用
+
+**📍 在哪裡做：🌐 瀏覽器（Open WebUI）**
+
+1. 回到 Open WebUI 首頁，按左上角的**新對話**。
+2. 上方的模型選單選「台北美食機器人」。
+3. 在下方的輸入框輸入：`大安燒肉 兩個人 預算800`
+
+看到「🔎 搜尋條件：大安區｜燒肉｜2 人｜每人 800 元內（LLM解析）」和 5 家餐廳就成功了。
+
+**可以試試這些說法**（都在 Open WebUI 的輸入框打）：
+- `我們三個想在信義吃麻辣鍋 一人一千`
+- 推薦完之後說 `換一批`、`第2間不要`、`再便宜一點`、`換成拉麵`
+- `忠孝復興站附近 拉麵 1人 300`
+- `你幫我挑一種 中山 2人 500`
+- `重新開始`
+
+### 第六步：更新到最新版
+
+**📍 在哪裡打：🖥️ 虛擬機（先照第零步連上）**
+
+```bash
+cd ~/projects/taipei-food-bot
+git pull
+ps aux | grep "[a]pi.py"
+```
+
+最後一行會顯示正在跑的 API，第二欄的數字是 PID。用它把舊的 API 關掉，再重新啟動。**📍 一樣在 🖥️ 虛擬機**：
+
+```bash
+kill PID數字
+HOST=0.0.0.0 setsid nohup ~/venvs/foodbot/bin/python api.py >> api.log 2>&1 < /dev/null & disown
+```
+
+（`PID數字` 要換成剛剛看到的數字，例如 `kill 12345`。）
+
+**🌐 Open WebUI 那邊不用重貼**：機器人的邏輯都在 API，只有 `openwebui_pipe.py` 本身有改動時（很少發生）才需要重貼。
+
+### 第七步：常見問題
+
+| 狀況 | 在哪裡處理 | 怎麼辦 |
+|---|---|---|
+| curl 顯示 `Connection refused` | 🖥️ 虛擬機 | API 沒有啟動。打 `tail -20 ~/projects/taipei-food-bot/api.log` 看錯誤訊息 |
+| 顯示 `Address already in use` | 🖥️ 虛擬機 | 5000 port 已經有人在用，用第六步的方法關掉舊的 API 再啟動 |
+| 條件行顯示「規則解析・未設定 LLM 金鑰」 | 🌐 Open WebUI 齒輪 | Llm Api Key 沒填，或貼錯了 |
+| 條件行顯示「規則解析・連不到 LLM 服務」 | — | LLM 伺服器暫時連不上，等一下再試 |
+| Open WebUI 顯示連不到 API | 🌐 Open WebUI 齒輪＋🖥️ 虛擬機 | 確認 Api Url 是 `http://testbed:5000/chat`，而且第三步啟動時有加 `HOST=0.0.0.0` |
+| 模型選單找不到機器人 | 🌐 Open WebUI 函式列表 | 確認開關有打開 |
+
+### 在自己電腦上測試（選用，給要改程式的人）
+
+**📍 在哪裡打：自己電腦的 PowerShell（不用連虛擬機）**，需要先裝好 Python 和 Git：
+
+```powershell
+git clone -b god040709new https://github.com/leedidi0817-cmyk/taipei-food-bot.git
+cd taipei-food-bot
+python -m pip install -r requirements.txt
 python api.py
 ```
 
-看到 `Running on http://127.0.0.1:5000` 即成功，視窗保持開著。
-
-**在實驗室平台（lab-30-docker）：**
-
-```bash
-source /opt/venv_torch/bin/activate
-cd ~/projects/taipei-food-bot
-python -c "import flask" || pip install flask   # 第一次才需要；沒有權限就改用 pip install --user flask
-nohup env HOST=0.0.0.0 python api.py > api.log 2>&1 &
-```
-
-`HOST=0.0.0.0` 讓 Open WebUI 容器連得到；`nohup` 讓 API 在背景持續執行。
-
-測試 API 是否正常（會回一則反問或推薦）：
-
-```bash
-curl -s -X POST localhost:5000/chat -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"大安燒肉 2人 800"}]}'
-```
-
-### 3. 在 Open WebUI 加入 Pipe（只要做一次）
-
-1. 左下角頭像 → **管理員控制台** → **函式** → **建立**
-2. 貼上 `openwebui_pipe.py` 的完整內容，填寫名稱與 ID 後儲存，並打開開關
-3. 點函式右邊的**齒輪**設定：
-
-| 設定 | 自己電腦 | 實驗室平台 |
-|---|---|---|
-| Api Url | 預設即可（`http://127.0.0.1:5000/chat`） | `http://testbed:5000/chat` |
-| Llm Api Key | 選填 | **自己的** `LLM_API_KEY`（實驗室 `.env` 裡） |
-| Llm Model | 選填 | `Qwen3.6-35B-A3B`（以管理者提供的名稱為準；留空會自動用服務上的第一個模型） |
-
-4. 新增對話，模型選這個 Pipe，輸入「大安燒肉 兩個人 預算800」測試
-
-> Api Url 要填到 `/chat` 為止（舊版設定的 `…/recommend` 要改成 `…/chat`）。
-
-**除錯模式**：齒輪的 `Debug` 打開後，每則回覆最後會多一個可以收合的「🔧 除錯資訊」：① LLM 理解了什麼 ② 程式整理後用了哪些條件（哪些來自 LLM、哪些來自規則、被哪個保護機制調整）③ 送去查詢的條件與找到幾家，最後附上 LLM 原始回傳的 JSON。這個區塊不會被當成對話內容，打開或關閉都不影響條件沿用。
-
-### 4. 更新到最新版
-
-機器人的邏輯都在 API，**更新時不用重貼 pipe**：
-
-```bash
-git pull
-pkill -f api.py; nohup env HOST=0.0.0.0 python api.py > api.log 2>&1 &
-```
-
-只有 `openwebui_pipe.py` 本身有改動時（很少發生），才需要重新貼到 Open WebUI。
+看到 `Running on http://127.0.0.1:5000` 就成功了，視窗保持開著。改完程式後可以跑 `python tests/run_scenarios.py --check`，確認舊功能沒有被改壞（見下方「成效評估」）。
 
 ## 推薦邏輯
 
