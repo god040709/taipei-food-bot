@@ -7,12 +7,13 @@
 只改程式真的有修正的欄位，其他照老師的答案。changed_fields() 列出跟老師不一樣的欄位，方便人工抽查。
 """
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-from lexicon import BUDGET_MIN_WORDS, CHOOSE_MARK, FIELDS  # noqa: E402
+from lexicon import BUDGET_MIN_WORDS, CATEGORY_SYNONYMS, CHOOSE_MARK, FIELDS  # noqa: E402
 from recommender import BUDGET_STEP  # noqa: E402
 
 
@@ -55,8 +56,13 @@ def gold_label(raw: dict, trace: dict, reply: str, last_text: str) -> dict:
         g["budget_min"] = None
 
     # 不要的類別：程式沒採用的拿掉（「換成拉麵」不代表不要原本的；這次說想吃的不會同時不要）
+    # 老師漏掉、程式靠規則讀到的（「吃小籠包吃到膩」）補上；只補這句話有提到的（以前說過的不算這句）
     avoid = prefs.get("avoid", [])
     g["avoid_categories"] = [c for c in g.get("avoid_categories") or [] if c in avoid]
+    g["avoid_categories"] += [c for c in avoid if c not in g["avoid_categories"] and mentioned(c, last_text)]
+    # 排除整個類別時，老師常順手把推薦過的店全部填成 reject；這句沒指名哪幾間就不算
+    if g["avoid_categories"] and not re.search(r"第|間|家|號|這些|這幾|都", last_text):
+        g["reject"] = []
     # 多類別：老師給了兩種以上、程式卻沒採用 → 用程式的
     if len(g.get("categories") or []) >= 2 and g["categories"] != prefs.get("cats"):
         g["categories"] = prefs.get("cats", [])
@@ -68,6 +74,11 @@ def gold_label(raw: dict, trace: dict, reply: str, last_text: str) -> dict:
     g["waived"] = [f for f in g.get("waived") or [] if final[FIELDS.index(f)] is None] \
         if all(f in FIELDS for f in g.get("waived") or []) else []
     return g
+
+
+def mentioned(cat: str, text: str) -> bool:
+    """這句話有沒有提到這個類別（正式名稱或同義詞）。"""
+    return any(w in text for w in [cat] + CATEGORY_SYNONYMS.get(cat, []))
 
 
 def chat_label(raw: dict, gold: dict) -> dict:
