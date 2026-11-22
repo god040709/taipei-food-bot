@@ -234,6 +234,69 @@ class FocusGen(Gen):
         return [self.pick(MOODS) + "，" + self.full_request()]
 
 
+# ---- 第三輪補強：第二輪模型還會錯的（菜名、拐彎的排除、高檔沒說預算、取消不要連鎖被當閒聊、「我跟女友」） ----
+# 評估情境裡出現過的菜名（打拋豬、湯包、左宗棠雞…）刻意不放，才測得出模型是不是真的會舉一反三
+DISHES3 = {
+    "泰式料理": ["紅咖哩", "鳳梨炒飯", "泰式烤雞", "蝦醬空心菜"],
+    "小籠包": ["燒賣", "蝦仁燒賣", "蒸餃"],
+    "日式料理": ["大阪燒", "茶碗蒸", "關東煮"],
+    "韓式料理": ["泡菜煎餅", "韓式炸醬麵", "辣炒豬肉", "馬鈴薯排骨湯"],
+    "義式料理": ["肉醬麵", "白酒蛤蜊麵", "墨魚麵"],
+    "美式餐廳": ["炸魚薯條", "起司薯條", "手撕豬肉堡"],
+    "中式餐廳": ["鳳梨蝦球", "客家小炒", "紅燒獅子頭", "三杯雞"],
+    "平價小吃": ["筒仔米糕", "豬血糕", "碗粿"],
+    "早午餐": ["總匯三明治", "歐姆蛋"],
+    "火鍋": ["藥膳鍋", "昆布鍋"],
+    "甜點": ["布丁", "馬卡龍", "奶酪"],
+}
+AVOID_NOW3 = ["吃{c}吃到膩", "{c}已經吃到怕", "這個月吃了好幾次{c}", "{c}連吃兩天了", "最近天天吃{c}",
+              "{c}吃到快吐了", "看到{c}就飽了", "{c}前天剛吃", "這週已經吃過兩次{c}", "對{c}沒感覺了",
+              "{c}暫時不想碰", "{c}有點吃怕了", "{c}上週吃三次了"]
+SORTS3 = ["想去高級一點的", "要很高檔的那種", "找貴的沒關係", "想吃最頂級的", "預算不限 要最好吃的",
+          "想找高檔餐廳", "要有質感的貴店", "越便宜越好", "找最省錢的"]
+PREF_OFF3 = ["連鎖也沒關係啦", "有連鎖也OK", "連鎖的也行喔", "連鎖店無所謂了", "不一定要隱藏版", "名店也可以啦"]
+PREF_ON3 = ["不要連鎖", "不想吃連鎖店", "想吃隱藏版的", "要冷門一點的店"]
+SHORT_SEARCH3 = ["便宜點啦", "再便宜些", "多一個人", "少一個人", "近一點的啦", "評價高的就好", "要有名一點的"]
+PAIRS3 = ["我跟女友", "我跟男友", "我和老婆", "我跟老公", "我和同事", "我跟朋友", "我帶我媽", "我跟我妹",
+          "我和室友", "我們倆", "我跟另一半"]
+
+
+class Focus3Gen(FocusGen):
+    def dialogue(self):
+        roll = self.r.random()
+        if roll < 0.2:  # 菜名 → 類型（新的菜名）
+            c = self.pick(DISHES3)
+            dish = self.pick(DISHES3[c])
+            return [self.full_request(food=self.pick([dish, f"想吃{dish}", f"來點{dish}", f"突然想吃{dish}"]))]
+        if roll < 0.4:  # 推薦完之後用拐彎的說法排除目前的類型
+            c = self.meal_cat()
+            return [self.full_request(food=c), self.pick(AVOID_NOW3).format(c=c)]
+        if roll < 0.55:  # 想吃高檔／便宜，沒說預算
+            n_text, _ = self.people()
+            return [self.join([self.where()[0], self.food()[0] or self.meal_cat(), n_text, self.pick(SORTS3)])]
+        if roll < 0.7:  # 先說不要連鎖或隱藏版，推薦完再取消（要找店，不是閒聊）
+            return [self.full_request(extra=self.pick(PREF_ON3)), self.pick(PREF_OFF3)]
+        if roll < 0.8:  # 推薦完之後很短的找店的話（不是閒聊）
+            return [self.full_request(), self.pick(SHORT_SEARCH3)]
+        # 「我跟女友」這種沒寫數字的兩個人
+        d = self.pick(DISTRICTS)
+        where, food = self.pick([d, d[:-1]]), self.meal_cat()
+        money = self.money(2)[0]
+        return [self.pick([f"{self.pick(PAIRS3)}想在{where}吃{food} {money}",
+                           f"{self.pick(PAIRS3)} {where} {food} {money}",
+                           f"今天{self.pick(PAIRS3)}要去{where}吃{food}，{money}"])]
+
+
+def focus3_dialogues(n: int, seed: int = 13) -> list:
+    """第三輪補強資料：[(編號, [使用者的話…])]，跟評估情境重複的對話跳過。"""
+    gen, blocked, out = Focus3Gen(seed), eval_sentences(), []
+    while len(out) < n:
+        turns = gen.dialogue()
+        if not any(t in blocked for t in turns):
+            out.append((f"focus3-{len(out):04d}", turns))
+    return out
+
+
 def chat_dialogues(n: int, seed: int = 11) -> list:
     """補強閒聊：推薦完之後連續兩句閒聊或無關的問題（閒聊在訓練資料裡太少）。"""
     gen, blocked, out = FocusGen(seed), eval_sentences(), []
@@ -248,7 +311,7 @@ def chat_dialogues(n: int, seed: int = 11) -> list:
 
 def known_dish(text: str):
     """句子裡有 DISHES 的菜名 → 那道菜的類別（只有一道時）；答案由程式決定，不用老師的（老師常說資料庫沒有）。"""
-    found = {c for c, dishes in DISHES.items() for d in dishes if d in text}
+    found = {c for table in (DISHES, DISHES3) for c, dishes in table.items() for d in dishes if d in text}
     return found.pop() if len(found) == 1 else None
 
 

@@ -8,7 +8,7 @@ from typing import Optional
 from recommender import BUDGET_STEP  # 預算的一個級距（200 元）
 from lexicon import (  # 詞庫、提示詞、文字處理
     ASK_MARK, BUDGET_MIN_WORDS, BUDGET_UP_WORDS, CATEGORIES, CATEGORY_SYNONYMS, CHAT_MARK, CHOOSE_MARK, CN_INDEX, DISTRICTS,
-    FIELDS, FIELD_SKIP_WORDS, MORE_WORDS, NEG_AFTER_RE, NEG_BEFORE_RE, NEG_JOIN_RE, NUM, PARSE_PROMPT, PERSON_PREFS,
+    FIELDS, FIELD_SKIP_WORDS, MORE_WORDS, NEG_AFTER_RE, NEG_BEFORE_RE, NEG_JOIN_RE, NUM, PAIR_RE, PARSE_PROMPT, PERSON_PREFS,
     PREF_OFF_WORDS, REJECT_SOFT, REJECT_STRONG, RELAXES, RELAX_LABELS, SKIP_WORDS, SORTS, STYLE_WORDS,
     SUBTYPES, TOTAL_WORDS, UNSURE_WORDS, as_list, find_near, fix_homophones, to_number,
 )
@@ -63,6 +63,8 @@ class UnderstandMixin:
         party_match = re.search(NUM + r"\s*個?\s*(?:人|位)", text)
         if party_match:
             party_size = to_number(party_match.group(1))
+        elif re.search(PAIR_RE, text):
+            party_size = 2  # 「我跟女友」「我和同事」「我們倆」：沒寫數字，但就是兩個人
 
         # 預算：「預算1000」「預算一千」「1000元」「500以內」「一人500」「每人一千」「1k」
         filler = r"\s*(?:大概|大約|約|差不多|抓|在|是|最多|頂多|上限|不超過|：|:)*\s*"

@@ -28,6 +28,9 @@ def load_rows(paths: str) -> list:
     老師讀錯的地方也已經改成正確的，全部都拿來訓練。"""
     rows = []
     for path in paths.split(","):
+        if not os.path.exists(path.strip()):
+            print(f"沒有 {path.strip()}，跳過")
+            continue
         with open(path.strip(), encoding="utf-8") as f:
             rows += [json.loads(line) for line in f if line.strip()]
     return rows
@@ -54,7 +57,7 @@ def gpu_free_gb() -> float:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default=",".join(os.path.join(HERE, "data", f) for f in ("train.jsonl", "focus.jsonl", "chat.jsonl")),
+    ap.add_argument("--data", default=",".join(os.path.join(HERE, "data", f) for f in ("train.jsonl", "focus.jsonl", "focus3.jsonl", "chat.jsonl")),
                     help="訓練資料（逗號分隔多個檔案）")
     ap.add_argument("--model", default="unsloth/Qwen3.5-4B")
     ap.add_argument("--name", default="parser-lora", help="存檔的資料夾名稱")

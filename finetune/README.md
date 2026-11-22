@@ -11,6 +11,7 @@
 |---|---|---|
 | 1. 收集訓練資料 | 本機（需要 `LLM_API_KEY`） | `python finetune/collect.py train --n 300` |
 | 1b. 補強資料（第二輪） | 本機 | `python finetune/collect.py focus --n 150`、`python finetune/collect.py chat --n 30` |
+| 1c. 補強資料（第三輪） | 本機 | `python finetune/collect.py focus3 --n 150` |
 | 2. 收集評估資料 | 本機 | `python finetune/collect.py eval` |
 | 2b. 第二份評估資料 | 本機 | `python finetune/collect.py cases` |
 | 2c. 老師（35B）的分數 | 本機或虛擬機（不用 GPU） | `python finetune/evaluate.py --teacher` |
@@ -38,6 +39,7 @@
 - 第二份評估資料 `eval_cases.json`：附預期結果的 153 個情境（`python finetune/collect.py cases`）。
 - 第三份 `eval_cases2.json`：第一輪微調之後才寫的 44 個情境，句子跟所有訓練資料都不重複，用來公平比較第一輪和第二輪（`evaluate.py --bot-only --cases finetune/eval_cases2.json`）。
 - 補強資料（第二輪）：`focus.jsonl` 針對第一輪的弱點（閒聊、無關問題、排除的說法、菜名、台北以外、排序、沒想法），`chat.jsonl` 補閒聊；菜名的類別由程式決定（`collect.py` 的 `fix_dish`），閒聊的答案不填前面的條件（`labels.py` 的 `chat_label`）。
+- 補強資料（第三輪）：`focus3.jsonl` 針對第二輪還會錯的（新的菜名、拐彎的排除「吃到膩」「這週吃三次了」、想吃高檔或便宜但沒說預算、先說不要連鎖再取消、推薦完很短的找店的話、「我跟女友」這種沒寫數字的兩個人）。評估情境裡的菜名（打拋豬、湯包…）刻意不放，才測得出會不會舉一反三。
 - 老師自己的分數不用 GPU 就能算：`python finetune/evaluate.py --teacher`。
 - 收集時反問、閒聊不呼叫 LLM（機器人改用固定句子），每句大約只花 1 次呼叫。
 
